@@ -9,58 +9,120 @@
 
 ## Description
 
-This package adds support for performing constrained density functional theory (cDFT) calculations using the PySCF and the GPU4PySCF. Constraints, regions, and property outputs are fully typed with PyDantic dataclasses to ensure type safety and documentation. The package is designed to be used in a workflow-based manner, with the user providing the constraints, regions, and property outputs they want to calculate. The package will then handle the rest of the calculation, including the solving for the constrained potential $V_c$.
+`cdft4pyscf` provides constrained density functional theory (cDFT) workflows on top of PySCF and GPU4PySCF.
+v0.1 focuses on `dft.UKS` and supports typed Python APIs for:
 
-### Constraints
+- atom-list regions
+- electron-number constraints (including non-integer targets)
+- net-charge constraints
+- direct optimization of constrained potentials (`Vc`) integrated into the mean-field `kernel()` cycle
 
-The following types of constraints are supported:
+## v0.1 Support Matrix
 
-- Number of electrons (non-integer values are supported)
-- Net charge
+- **Method:** `dft.UKS` only
+- **Backends:** CPU (`pyscf`) and GPU (`gpu4pyscf`) routes
+- **Population analysis:** Löwdin
+- **Constraint composition:** multiple simultaneous constraints, each with its own Lagrange multiplier
+- **Interface:** class-first Python API (`CDFT_UKS` mean-field objects)
 
-### Regions
+## Usage
 
-The currently supported regions are:
+```python
+from pyscf import gto
 
-- Atom lists
+from cdft4pyscf import CDFT_UKS, ConstraintSpec, RegionSpec
 
-### Population Analysis
-
-The current supported methods for population analysis are:
-
-#### Löwdin
-
-The Löwdin population analysis for constrained region, $C$, is done using the following equation:
-
-```math
-\begin{align*}
-    N_c & = \sum\limits_{\mu \in C}(\mathbf{S}^{1/2}\mathbf{P}\mathbf{S}^{1/2})_{\mu\mu} \\
-    & = \sum\limits_{\mu \in C}\sum\limits_{\nu\lambda}S_{\mu\nu}^{1/2}P_{\nu\lambda}S_{\lambda\mu}^{1/2} \\
-    & = \sum\limits_{\nu\lambda}P_{\nu\lambda}\sum\limits_{\mu \in C}S_{\mu\nu}^{1/2}S_{\lambda\mu}^{1/2} \\
-    &  = \text{Tr}(\mathbf{P}\mathbf{w_c^L})
-\end{align*}
+mol = gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g", spin=0, charge=0, verbose=0)
+mf = CDFT_UKS(
+    mol,
+    constraints=[
+        ConstraintSpec(
+            name="n_frag_a",
+            kind="electron_number",
+            target=1.0,
+            region=RegionSpec(name="frag_a", atom_indices=[0]),
+        ),
+        ConstraintSpec(
+            name="q_total",
+            kind="net_charge",
+            target=0.0,
+            region=RegionSpec(name="all_atoms", atom_indices=[0, 1]),
+        ),
+    ],
+)
+mf.xc = "lda,vwn"
+energy = mf.kernel()
+print(mf.converged, energy, mf.multiplier_by_constraint())
 ```
 
-where $\mathbf{S}^{1/2}$ is the square root of the overlap matrix and $\mathbf{w_c^L}$ is the Löwdin weight matrix defined as:
+## Installation
 
-```math
-w_{c\lambda\nu}^L = \sum\limits_{\lambda \in C}S_{\lambda\mu}^{1/2}S_{\mu\nu}^{1/2}
+```bash
+pip install -e .
 ```
 
+GPU support is optional and can be installed via extras:
 
-### Solving For $`V_c`$
+```bash
+pip install -e ".[gpu]"
+```
 
-Solving for $V_c$ in the cDFT is done using the direct optimization approach explained in section 2.2 of [1]. The constraint is satisfied by first solving the Kohn-Sham equations for the constrained density matrix $\rho_c$ and then using the constrained density matrix to solve for $V_c$. For using DIIS to solve the KS equations the process from [1] is as follows:
+Pixi also provides optional GPU environments:
 
-1. Construct the current Fock matrix, $\mathbf{F}$ from the current density matrix, $\mathbf{P}$.
-2. Use the optimal $V_c$ from the last iteration to build the constrained Fock matrix $\mathbf{F}_c = \mathbf{F} + V_c \mathbf{w}_c$.
-3. Determine the DIIS linear coefficients $\mathbf{d}^i$, and replace the current Fock matrix with $\mathbf{F}^\ast = \sum\limits_{i}^{n}\mathbf{d}^i \mathbf{F}_c^i$.
-4. Fix $\mathbf{F}^\ast$, and optimize $V_c$ again until the constraints are satisfied.
-5. Obtain the new density matrix from $\mathbf{F}^\ast$ and the optimized $V_c$. The new $\mathbf{P}$ and the optimized $V_c$ are then fed into the next iteration, and the above steps are repeated until convergence.
+```bash
+pixi shell -e gpu
+pixi shell -e dev-gpu
+```
+
+## Documentation
+
+The project docs are configured with Zensical.
+
+- Serve locally: `pixi run -e docs docs-serve`
+- Build static site: `pixi run -e docs docs-build`
+
+The source pages live under `docs/`, and configuration is in `zensical.toml`.
+
+## Example Script
+
+A more complete example in the style of the PySCF advanced cDFT example is
+available at:
+
+- `examples/033_constrained_dft.py`
+
+## Algorithm Notes
+
+Löwdin population for constrained region `C`:
+
+```math
+N_c = \mathrm{Tr}(\mathbf{P}\mathbf{w_c^L})
+```
+
+with `w_c^L` built from `S^{1/2}` and atom-region AO projector terms.
+
+`Vc` is solved with direct optimization (Wu and Van Voorhis, 2006, Section 2.2)
+inside the cDFT mean-field object:
+
+1. Build base Fock inside the SCF cycle.
+2. Optimize `Vc` against current base Fock (SciPy root solver).
+3. Inject constraint operator into the mean-field Fock construction.
+4. Let PySCF SCF machinery (including built-in DIIS controls) continue the cycle.
+
+## Convergence and Failure Behavior
+
+- SCF and cDFT tolerances are configurable on the mean-field object.
+- Fractional electron targets are treated as continuous target values during `Vc` root solving.
+- If convergence fails within iteration limits, the class raises `ConvergenceError`.
+
+## Known v0.1 Caveats
+
+- `RKS`/`ROKS`/HF-style references are not yet supported.
+- GPU behavior depends on local CUDA/GPU4PySCF availability.
+- The current API is Python-only (no CLI in v0.1).
 
 ## References
 
-[1] Q. Wu and T. Van Voorhis, “Constrained Density Functional Theory and Its Application in Long-Range Electron Transfer,” J. Chem. Theory Comput., vol. 2, no. 3, pp. 765–774, May 2006, doi: 10.1021/ct0503163.
+[1] Q. Wu and T. Van Voorhis, “Constrained Density Functional Theory and Its Application in Long-Range Electron Transfer,” J. Chem. Theory Comput., vol. 2, no. 3, pp. 765-774, May 2006, doi: 10.1021/ct0503163.
 
 ## Credits
 

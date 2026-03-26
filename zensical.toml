@@ -1,0 +1,42 @@
+[project]
+site_name = "cdft4pyscf"
+site_description = "Constrained DFT workflows built on top of PySCF and GPU4PySCF."
+site_author = "Carson Farmer"
+site_url = "https://cfarm6.github.io/cdft4pyscf/"
+copyright = "Copyright © 2026 Carson Farmer"
+
+repo_url = "https://github.com/cfarm6/cdft4pyscf"
+repo_name = "cfarm6/cdft4pyscf"
+
+nav = [
+  { "Start Here" = "index.md" },
+  { "Install" = "installation.md" },
+  { "Quickstart" = "usage.md" },
+  { "Examples" = "examples.md" },
+  { "API Overview" = "api.md" },
+  { "API by Workflow" = "api-workflow.md" },
+  { "API Reference" = "api-reference.md" },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "announce.dismiss",
+  "content.code.copy",
+  "navigation.footer",
+  "navigation.instant",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.top",
+  "search.highlight",
+]
+
+[[project.theme.palette]]
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"

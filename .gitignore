@@ -178,5 +178,7 @@ pyrightconfig.json
 # Pixi
 .pixi
 
-# Research Paper Context
+# Papers
 .papers/
+
+examples/chkfiles/

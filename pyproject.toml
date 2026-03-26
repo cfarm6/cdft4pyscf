@@ -2,18 +2,27 @@
 name = "cdft4pyscf"
 description = "cdft4pyscf"
 license = "MIT"
-version = "0.0.1"
+version = "0.1.0"
 readme = "README.md"
 keywords = []
 authors = [{name = "Carson Farmer"}]
-requires-python = ">=3.14"
-dependencies = ["pyscf>=2.12.1,<3", "gpu4pyscf-cuda13x>=1.6.1,<2", "pydantic>=2.12.5,<3"]
+requires-python = ">=3.12"
+dependencies = [
+    "pyscf>=2.12.1,<3",
+    "pydantic>=2.12.5,<3",
+    "scipy>=1.17.1,<2",
+    "zensical>=0.0.29,<1",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "gpu4pyscf-cuda13x>=1.6.1,<2",
+    "cupy-cuda13x>=14.0.1,<15",
+]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
 platforms = ["linux-64"]
-
-[tool.pixi.dependencies]
 
 [tool.pixi.pypi-dependencies]
 cdft4pyscf = { path = ".", editable = true }
@@ -21,6 +30,20 @@ cdft4pyscf = { path = ".", editable = true }
 [tool.pixi.environments]
 default = { solve-group = "default" }
 dev = { features = ["dev"], solve-group = "default"}
+docs = { features = ["docs"], solve-group = "default"}
+gpu = { features = ["gpu"], solve-group = "default"}
+dev-gpu = { features = ["dev", "gpu"], solve-group = "default"}
+
+[tool.pixi.feature.gpu.activation.env]
+CUDA_PATH="$PWD/.pixi/envs/gpu/targets/x86_64-linux"
+LD_LIBRARY_PATH="$CUDA_PATH/lib:$LD_LIBRARY_PATH"
+
+[tool.pixi.feature.gpu.dependencies]
+cuda = ">=12.4.1,<13"
+cupy = ">=14.0.1,<15"
+
+[tool.pixi.feature.gpu.pypi-dependencies]
+gpu4pyscf-cuda13x = ">=1.6.1,<2"
 
 [tool.pixi.feature.dev.tasks]
 fmt = { cmd="ruff format ." }
@@ -37,6 +60,13 @@ pre-commit = ">=4.2"
 
 [tool.pixi.feature.dev.pypi-dependencies]
 ty = "*"
+
+[tool.pixi.feature.docs.pypi-dependencies]
+zensical = ">=0.0.29"
+
+[tool.pixi.feature.docs.tasks]
+docs-serve = { cmd = "zensical serve" }
+docs-build = { cmd = "zensical build --clean" }
 
 [tool.ruff]
 line-length = 100
