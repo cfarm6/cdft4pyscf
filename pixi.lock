@@ -759,11 +759,11 @@ packages:
 - pypi: ./
   name: cdft4pyscf
   version: 0.1.0
-  sha256: 0047f1720946e12be107e39a53d2baa951fdbba85b1fbdc8b6d501627e476637
+  sha256: 72ad1686c20d4d47aa318df149bff6030f3968c1c3ec7d96dc44c4c998bd385f
   requires_dist:
   - pyscf>=2.12.1,<3
   - pydantic>=2.12.5,<3
-  - scipy>=1.17.1,<2
+  - scipy>=1.16.0,<2
   - zensical>=0.0.29,<1
   - gpu4pyscf-cuda13x>=1.6.1,<2 ; extra == 'gpu'
   - cupy-cuda13x>=14.0.1,<15 ; extra == 'gpu'
