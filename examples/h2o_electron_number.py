@@ -32,6 +32,7 @@ def main() -> None:
                 region=RegionSpec(name="hydrogen_fragment", atom_indices=[1]),
             ),
         ],
+        population_basis="iao",
         initial_vc=[0.25, 0.001],
         conv_tol=1e-7,
         vc_tol=1e-7,

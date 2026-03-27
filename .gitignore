@@ -182,3 +182,4 @@ pyrightconfig.json
 .papers/
 
 examples/chkfiles/
+.scratch/

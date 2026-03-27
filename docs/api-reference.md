@@ -24,6 +24,7 @@ Docstring: **"Class-first constrained UKS object for PySCF CPU workflows."**
 - `mol`: PySCF molecule object.
 - `constraints`: list of `ConstraintSpec`.
 - optional kwargs:
+  - `population_basis` (`"lowdin" | "meta_lowdin" | "iao" | "nao"`): orthogonal-AO basis used to build constraint population operators. Default: `"lowdin"`.
   - `initial_vc`
   - `conv_tol` (cDFT residual tolerance)
   - `vc_tol` and `vc_max_cycle` (inner multiplier solve controls)
@@ -116,12 +117,28 @@ Run configuration object passed into `build_cdft_mean_field`.
 - `constraints: list[ConstraintSpec]` - required, must contain at least one
   item.
 - `options: SolverOptions = SolverOptions()`
+- `population: PopulationOptions = PopulationOptions()`
 
 Validation behavior:
 
 - region names must be unique.
 - constraint names must be unique.
 - constraints referencing a region must reference a defined region name.
+
+### `PopulationOptions`
+
+Population analysis settings used to build constraint operators.
+
+- `basis: Literal["lowdin","meta_lowdin","iao","nao"] = "lowdin"`
+- `localize_mos: MoLocalizationOptions | None = None` (analysis only)
+
+### `MoLocalizationOptions`
+
+Optional post-run MO localization configuration (analysis only).
+
+- `method: Literal["boys","pipek","ibo","edmiston","cholesky"]`
+- `space: Literal["occ","vir","all"] = "occ"`
+- `spin: Literal["alpha","beta","both"] = "both"`
 
 ## Exceptions
 

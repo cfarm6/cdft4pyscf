@@ -21,7 +21,7 @@ v0.1 focuses on `dft.UKS` and supports typed Python APIs for:
 
 - **Method:** `dft.UKS` only
 - **Backends:** CPU (`pyscf`) and GPU (`gpu4pyscf`) routes
-- **Population analysis:** Löwdin
+- **Population analysis:** orthogonal-AO populations via PySCF `pyscf.lo.orth_ao` (default: `lowdin`; also supports `meta_lowdin` and `iao`)
 - **Constraint composition:** multiple simultaneous constraints, each with its own Lagrange multiplier
 - **Interface:** class-first Python API (`CDFT_UKS` mean-field objects)
 

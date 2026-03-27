@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 from typing import Any
 
 import numpy as np
@@ -137,9 +138,15 @@ class _CDFTMixin:
 
         dm_cache: np.ndarray | None = None
         values_cache: np.ndarray | None = None
+        residuals_cache: np.ndarray | None = None
+
+        def emit(msg: str) -> None:
+            if self.cdft_log_inner_solver:
+                print(msg)
+                self.cdft_messages.append(msg)
 
         def objective(vc: np.ndarray) -> np.ndarray:
-            nonlocal dm_cache, values_cache
+            nonlocal dm_cache, values_cache, residuals_cache
             operator = self._constraint_operator(vc)
             operator_like = _to_backend_array(base_fock[0], operator)
             constrained_fock = _stack_spin_matrices(
@@ -151,9 +158,30 @@ class _CDFTMixin:
                 _to_numpy_array(dm[0] + dm[1]),
                 self.constraint_system,
             )
+            residuals = values - self.constraint_system.targets
             dm_cache = dm
             values_cache = values
-            return values - self.constraint_system.targets
+            residuals_cache = residuals
+            if self.cdft_log_inner_solver:
+                vc_fmt = np.array2string(np.asarray(vc, dtype=float), precision=8, separator=", ")
+                val_fmt = np.array2string(
+                    np.asarray(values, dtype=float), precision=8, separator=", "
+                )
+                res_fmt = np.array2string(
+                    np.asarray(residuals, dtype=float), precision=8, separator=", "
+                )
+                emit(f"[cDFT][inner-eval] vc={vc_fmt} values={val_fmt} residuals={res_fmt}")
+                for name, value, target in zip(
+                    self.constraint_system.names,
+                    np.asarray(values, dtype=float),
+                    np.asarray(self.constraint_system.targets, dtype=float),
+                    strict=True,
+                ):
+                    emit(
+                        f"[cDFT][inner-eval] {name} value={float(value): .8f} "
+                        f"target={float(target): .8f}"
+                    )
+            return residuals
 
         result = optimize.root(
             objective,
@@ -161,6 +189,7 @@ class _CDFTMixin:
             method="hybr",
             options={"xtol": self.cdft_vc_tol, "maxfev": self.cdft_vc_max_cycle},
         )
+        logging.info(f"cDFT inner solver result: {result}")
         self.cdft_inner_calls += int(result.nfev)
         self.vc = np.asarray(result.x, dtype=float)
 
@@ -176,16 +205,24 @@ class _CDFTMixin:
                 _to_numpy_array(dm_cache[0] + dm_cache[1]),
                 self.constraint_system,
             )
+            residuals_cache = values_cache - self.constraint_system.targets
 
         self.cdft_last_values = np.asarray(values_cache, dtype=float)
         self.cdft_last_residuals = self.cdft_last_values - self.constraint_system.targets
         self.cdft_residual_norm = float(np.linalg.norm(self.cdft_last_residuals))
         if self.cdft_log_inner_solver:
+            vc_fmt = np.array2string(self.vc, precision=8, separator=", ")
+            val_fmt = np.array2string(self.cdft_last_values, precision=8, separator=", ")
+            res_array = np.asarray(
+                residuals_cache if residuals_cache is not None else self.cdft_last_residuals
+            )
+            res_fmt = np.array2string(res_array, precision=8, separator=", ")
             msg = (
                 f"[cDFT][inner] success={bool(result.success)} status={int(result.status)} "
                 f"nfev={int(result.nfev)} residual_norm={self.cdft_residual_norm:.3e}"
             )
-            self.cdft_messages.append(msg)
+            emit(msg)
+            emit(f"[cDFT][inner-final] vc={vc_fmt} values={val_fmt} residuals={res_fmt}")
 
     def get_fock(
         self: Any,
@@ -333,6 +370,7 @@ class CDFT_UKS(_CDFTMixin, pyscf_uks.UKS):  # noqa: N801
         mol: Any,
         *,
         constraints: list[Any],
+        population_basis: str = "lowdin",
         initial_vc: np.ndarray | list[float] | None = None,
         conv_tol: float = 1e-7,
         vc_tol: float = 1e-6,
@@ -341,12 +379,12 @@ class CDFT_UKS(_CDFTMixin, pyscf_uks.UKS):  # noqa: N801
         raise_on_unconverged: bool = True,
     ) -> None:
         super().__init__(mol)
-        overlap = self.get_ovlp(mol)
         system = build_constraint_system(
             constraints=constraints,
-            overlap=overlap,
+            mol=mol,
             ao_slices=mol.aoslice_by_atom(),
             atom_charges=np.asarray(mol.atom_charges(), dtype=float),
+            population_basis=population_basis,
         )
         self._init_cdft(
             constraint_system=system,
@@ -368,6 +406,7 @@ def _build_cdft_uks_gpu_class(base_gpu_uks: type[Any]) -> type[Any]:
             mol: Any,
             *,
             constraints: list[Any],
+            population_basis: str = "lowdin",
             initial_vc: np.ndarray | list[float] | None = None,
             conv_tol: float = 1e-7,
             vc_tol: float = 1e-6,
@@ -376,12 +415,12 @@ def _build_cdft_uks_gpu_class(base_gpu_uks: type[Any]) -> type[Any]:
             raise_on_unconverged: bool = True,
         ) -> None:
             super().__init__(mol)
-            overlap = _to_numpy_array(self.get_ovlp(mol))
             system = build_constraint_system(
                 constraints=constraints,
-                overlap=overlap,
+                mol=mol,
                 ao_slices=mol.aoslice_by_atom(),
                 atom_charges=np.asarray(mol.atom_charges(), dtype=float),
+                population_basis=population_basis,
             )
             self._init_cdft(
                 constraint_system=system,

@@ -24,6 +24,7 @@ def test_cdft_uks_builds_constraint_accessors() -> None:
                 region=RegionSpec(name="frag_a", atom_indices=[0]),
             )
         ],
+        population_basis="lowdin",
     )
     multipliers = mf.multiplier_by_constraint()
     values = mf.constraint_values(dm=mf.get_init_guess(mol))
@@ -58,6 +59,7 @@ def test_cdft_get_fock_updates_vc() -> None:
             )
         ],
         initial_vc=[0.123],
+        population_basis="lowdin",
     )
     mf.xc = "lda,vwn"
     assert mf.vc[0] == pytest.approx(0.123)

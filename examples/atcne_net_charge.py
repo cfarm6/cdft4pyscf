@@ -105,6 +105,7 @@ for spacing in SPACING:
             ),
         ],
         initial_vc=[-0.107],
+        population_basis="iao",
         conv_tol=1e-7,
         vc_tol=1e-7,
         vc_max_cycle=80,
@@ -132,6 +133,7 @@ for spacing in SPACING:
             ),
         ],
         initial_vc=[0.01],
+        population_basis="iao",
         conv_tol=1e-7,
         vc_tol=1e-7,
         vc_max_cycle=80,
@@ -150,7 +152,3 @@ for spacing in SPACING:
     print(f"E2: {E2}")
     V = np.sqrt((U0 - E1) * (U0 - E2))
     print(f"V: {V}")
-# U0 - -987.504794725143
-# E1 - -987.495524928356
-# E2 - -987.456254347929
-#

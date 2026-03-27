@@ -8,6 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ConstraintKind = Literal["electron_number", "net_charge"]
 BackendKind = Literal["cpu", "gpu"]
+PopulationBasis = Literal["lowdin", "meta_lowdin", "iao", "nao"]
+MoLocalizationMethod = Literal["boys", "pipek", "ibo", "edmiston", "cholesky"]
+MoLocalizationSpace = Literal["occ", "vir", "all"]
+MoLocalizationSpin = Literal["alpha", "beta", "both"]
 
 
 class RegionSpec(BaseModel):
@@ -76,6 +80,25 @@ class SolverOptions(BaseModel):
     log_inner_solver: bool = False
 
 
+class MoLocalizationOptions(BaseModel):
+    """Optional post-run MO localization configuration (analysis only)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    method: MoLocalizationMethod
+    space: MoLocalizationSpace = "occ"
+    spin: MoLocalizationSpin = "both"
+
+
+class PopulationOptions(BaseModel):
+    """Population analysis settings used to build constraint operators."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    basis: PopulationBasis = "lowdin"
+    localize_mos: MoLocalizationOptions | None = None
+
+
 class RunRequest(BaseModel):
     """Top-level request payload for a cDFT run."""
 
@@ -90,6 +113,7 @@ class RunRequest(BaseModel):
     regions: list[RegionSpec] = Field(default_factory=list)
     constraints: list[ConstraintSpec] = Field(min_length=1)
     options: SolverOptions = Field(default_factory=SolverOptions)
+    population: PopulationOptions = Field(default_factory=PopulationOptions)
 
     @model_validator(mode="after")
     def _validate_unique_names(self) -> "RunRequest":

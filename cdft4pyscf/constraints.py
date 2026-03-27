@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from cdft4pyscf.population import constrained_population, lowdin_sqrt_overlap, lowdin_weight_matrix
+from cdft4pyscf.population import constrained_population, orth_ao_weight_matrix
 
 if TYPE_CHECKING:
     from cdft4pyscf.models import ConstraintSpec
@@ -28,13 +28,12 @@ class ConstraintSystem:
 def build_constraint_system(
     *,
     constraints: list["ConstraintSpec"],
-    overlap: np.ndarray,
+    mol: object,
     ao_slices: np.ndarray,
     atom_charges: np.ndarray,
+    population_basis: str = "lowdin",
 ) -> ConstraintSystem:
     """Build per-constraint operators and target vector."""
-    overlap_sqrt = lowdin_sqrt_overlap(overlap)
-
     names: list[str] = []
     kinds: list[str] = []
     targets: list[float] = []
@@ -55,7 +54,12 @@ def build_constraint_system(
                 )
             else:
                 atom_indices = region_spec.atom_indices if region_spec is not None else []
-            operator = lowdin_weight_matrix(overlap_sqrt, atom_indices, ao_slices)
+            operator = orth_ao_weight_matrix(
+                mol=mol,
+                basis=population_basis,
+                atom_indices=atom_indices,
+                ao_slices=ao_slices,
+            )
             targets.append(constraint.target)
             operators.append(operator)
             report_scales.append(1.0)
@@ -66,7 +70,12 @@ def build_constraint_system(
                 msg = "net_charge constraints require a single region."
                 raise ValueError(msg)
             atom_indices = region_spec.atom_indices
-            operator = lowdin_weight_matrix(overlap_sqrt, atom_indices, ao_slices)
+            operator = orth_ao_weight_matrix(
+                mol=mol,
+                basis=population_basis,
+                atom_indices=atom_indices,
+                ao_slices=ao_slices,
+            )
             region_nuclear_charge = float(np.sum(atom_charges[atom_indices], dtype=float))
             target_electrons = region_nuclear_charge - constraint.target
             targets.append(target_electrons)

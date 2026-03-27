@@ -26,6 +26,7 @@ def build_cdft_mean_field(request: "RunRequest") -> Any:
         mf = CDFT_UKS(
             mol,
             constraints=request.constraints,
+            population_basis=request.population.basis,
             initial_vc=request.options.initial_vc,
             conv_tol=request.options.conv_tol,
             vc_tol=request.options.vc_tol,
@@ -36,6 +37,7 @@ def build_cdft_mean_field(request: "RunRequest") -> Any:
         mf = CDFT_UKS_GPU(
             mol,
             constraints=request.constraints,
+            population_basis=request.population.basis,
             initial_vc=request.options.initial_vc,
             conv_tol=request.options.conv_tol,
             vc_tol=request.options.vc_tol,
