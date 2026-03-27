@@ -26,9 +26,9 @@ Docstring: **"Class-first constrained UKS object for PySCF CPU workflows."**
 - optional kwargs:
   - `population_basis` (`"lowdin" | "meta_lowdin" | "iao" | "nao"`): orthogonal-AO basis used to build constraint population operators. Default: `"lowdin"`.
   - `initial_vc`
-  - `conv_tol` (cDFT residual tolerance)
-  - `vc_tol` and `vc_max_cycle` (inner multiplier solve controls)
-  - `log_inner_solver`
+  - `constraint_conv_tol` (cDFT residual tolerance)
+  - `inner_vc_tol`, `inner_vc_max_cycle`, and `inner_vc_max_step` (inner multiplier solve controls)
+  - `inner_solver_trace`
   - `raise_on_unconverged`
 
 #### Important methods/attributes
@@ -37,6 +37,7 @@ Docstring: **"Class-first constrained UKS object for PySCF CPU workflows."**
 - `constraint_values()` returns `dict[str, float]`.
 - `constraint_residuals()` returns `dict[str, float]`.
 - `multiplier_by_constraint()` returns `dict[str, float]`.
+- `cdft_diagnostics()` returns structured solver diagnostics.
 - `vc` stores the latest multiplier vector.
 - `cdft_residual_norm` and `cdft_inner_calls` store diagnostics.
 
@@ -55,7 +56,7 @@ Builds a configured constrained mean-field object from a typed request.
 
 ## Models
 
-Module docstring: **"Typed request/response models for cDFT workflows."**
+Module docstring: **"Typed request models for class-based cDFT workflows."**
 
 ### `RegionSpec`
 
@@ -94,12 +95,13 @@ Validation behavior:
 Docstring: **"Numerical controls for the outer SCF and inner multiplier solves."**
 
 - `max_cycle: int = 50` - max outer iterations (`>= 1`).
-- `conv_tol: float = 1e-7` - residual tolerance (`> 0`).
-- `dm_tol: float = 1e-6` - density-matrix change tolerance (`> 0`).
-- `vc_tol: float = 1e-6` - inner multiplier solve tolerance (`> 0`).
-- `vc_max_cycle: int = 50` - max inner iterations (`>= 1`).
+- `scf_conv_tol: float = 1e-6` - SCF convergence tolerance (`> 0`).
+- `constraint_conv_tol: float = 1e-7` - cDFT residual tolerance (`> 0`).
+- `inner_vc_tol: float = 1e-6` - inner multiplier solve tolerance (`> 0`).
+- `inner_vc_max_cycle: int = 50` - max inner iterations (`>= 1`).
+- `inner_vc_max_step: float = 0.25` - bounded per-update multiplier step (`>= 0`).
 - `verbosity: int = 0` - logging level (`0..3`).
-- `log_inner_solver: bool = False` - include per-iteration inner-solver logs.
+- `inner_solver_trace: bool = False` - include per-iteration inner-solver logs.
 
 ### `RunRequest`
 
@@ -113,7 +115,6 @@ Run configuration object passed into `build_cdft_mean_field`.
 - `spin: int = 0`
 - `charge: int = 0`
 - `backend: Literal["cpu", "gpu"] = "cpu"`
-- `regions: list[RegionSpec] = []`
 - `constraints: list[ConstraintSpec]` - required, must contain at least one
   item.
 - `options: SolverOptions = SolverOptions()`
@@ -121,9 +122,7 @@ Run configuration object passed into `build_cdft_mean_field`.
 
 Validation behavior:
 
-- region names must be unique.
 - constraint names must be unique.
-- constraints referencing a region must reference a defined region name.
 
 ### `PopulationOptions`
 

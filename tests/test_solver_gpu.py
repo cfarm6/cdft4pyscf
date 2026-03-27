@@ -1,4 +1,4 @@
-"""GPU backend tests."""
+"""GPU backend and solver-mode tests."""
 
 from __future__ import annotations
 
@@ -7,28 +7,23 @@ from typing import Any
 
 import numpy as np
 
-from cdft4pyscf import meanfield
 from cdft4pyscf.api import build_cdft_mean_field
-from cdft4pyscf.constraints import ConstraintSystem
 from cdft4pyscf.exceptions import BackendUnavailableError
-from cdft4pyscf.meanfield import CDFT_UKS_GPU, _CDFTMixin
-from cdft4pyscf.models import ConstraintSpec, RegionSpec, RunRequest
-
-UNCHANGED_VC = 0.1
-BOUNDED_VC = 0.75
+from cdft4pyscf.meanfield import CDFT
+from cdft4pyscf.models import Constraint, FragmentTerm, RunRequest, SolverOptions
 
 
 def test_gpu_backend_builds_or_raises_typed_error() -> None:
-    """GPU requests should either build GPU CDFT or raise typed backend error."""
+    """GPU requests should either build a CDFT wrapper or raise typed error."""
     request = RunRequest(
         atom="H 0 0 0; H 0 0 0.74",
         backend="gpu",
         constraints=[
-            ConstraintSpec(
+            Constraint(
                 name="q_tot",
-                kind="net_charge",
+                fragments=[FragmentTerm(atoms=[0, 1], coeff=1.0)],
                 target=0.0,
-                region=RegionSpec(name="all_atoms", atom_indices=[0, 1]),
+                target_type="charge",
             )
         ],
     )
@@ -36,127 +31,97 @@ def test_gpu_backend_builds_or_raises_typed_error() -> None:
         mf = build_cdft_mean_field(request)
     except BackendUnavailableError:
         return
-    assert isinstance(mf, CDFT_UKS_GPU)
+    assert isinstance(mf, CDFT)
 
 
-def test_get_fock_avoids_implicit_numpy_coercion() -> None:
-    """get_fock should not coerce GPU-like arrays through np.asarray."""
+class DummyBaseMF:
+    """Small fake mean-field object to unit-test solver mode wiring."""
 
-    class FakeGPUArray:
-        def __init__(self, data: np.ndarray) -> None:
-            self._data = np.asarray(data, dtype=float)
+    def __init__(self) -> None:
+        self.mol = SimpleNamespace(
+            atom_charges=lambda: [1.0, 1.0],
+            aoslice_by_atom=lambda: np.array([[0, 0, 0, 1], [0, 0, 1, 2]], dtype=int),
+        )
+        self.converged = True
 
-        def __getitem__(self, index):
-            return FakeGPUArray(self._data[index])
+    def get_ovlp(self, _mol: Any) -> np.ndarray:
+        """Return overlap matrix."""
+        return np.eye(2, dtype=float)
 
-        def __add__(self, other):
-            if isinstance(other, FakeGPUArray):
-                return FakeGPUArray(self._data + other._data)
-            return FakeGPUArray(self._data + np.asarray(other, dtype=float))
+    def get_hcore(self, _mol: Any) -> np.ndarray:
+        """Return one-electron core matrix."""
+        return np.eye(2, dtype=float)
 
-        def __radd__(self, other):
-            return self.__add__(other)
+    def get_veff(self, _mol: Any, _dm: Any = None) -> np.ndarray:
+        """Return effective potential tensor."""
+        return np.zeros((2, 2, 2), dtype=float)
 
-        def get(self) -> np.ndarray:
-            return self._data.copy()
+    def eig(self, fock: np.ndarray, _overlap: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return a deterministic eigensystem."""
+        return np.linalg.eigvalsh(fock[0]), np.eye(2, dtype=float)
 
-        def __array__(self, dtype=None):  # pragma: no cover - failure path sentinel.
-            raise TypeError("Implicit conversion to a NumPy array is not allowed.")
+    def get_occ(self, _mo_energy: np.ndarray, _mo_coeff: np.ndarray) -> np.ndarray:
+        """Return fixed occupations."""
+        return np.array([[1.0, 0.0], [1.0, 0.0]], dtype=float)
 
-    class _BaseGetFock:
-        def get_fock(self, *, h1e=None, **_kwargs):
-            return h1e
-
-    class DummyCDFT(_CDFTMixin, _BaseGetFock):
-        pass
-
-    system = ConstraintSystem(
-        names=["q_tot"],
-        kinds=["net_charge"],
-        targets=np.asarray([0.0], dtype=float),
-        operators=[np.eye(2, dtype=float)],
-        report_scales=np.asarray([-1.0], dtype=float),
-        report_offsets=np.asarray([0.0], dtype=float),
-    )
-    mf = DummyCDFT()
-    mf._init_cdft(constraint_system=system, initial_vc=[0.0])
-
-    h1e = FakeGPUArray(np.eye(2, dtype=float))
-    vhf = FakeGPUArray(np.zeros((2, 2, 2), dtype=float))
-    s1e = FakeGPUArray(np.eye(2, dtype=float))
-    dm = FakeGPUArray(np.zeros((2, 2, 2), dtype=float))
-
-    fock = mf.get_fock(h1e=h1e, s1e=s1e, vhf=vhf, dm=dm, cycle=-1)
-    getter = getattr(fock, "get", None)
-    fock_np = getter() if callable(getter) else np.asarray(fock)
-    assert fock_np.shape == (2, 2)
-
-
-def test_update_vc_rejects_non_improving_failed_root(monkeypatch) -> None:
-    """Failed inner solves should not overwrite vc with a worse candidate."""
-
-    class DummyCDFT(_CDFTMixin):
-        def _density_from_fock(self: Any, fock: np.ndarray, overlap: np.ndarray) -> np.ndarray:
-            _ = overlap
-            return np.asarray(fock, dtype=float)
-
-    def fake_root(_objective, x0, **_kwargs):
-        return SimpleNamespace(
-            x=np.asarray([10.0], dtype=float),
-            success=False,
-            status=2,
-            nfev=1,
+    def make_rdm1(self, mo_coeff: Any = None, mo_occ: Any = None) -> np.ndarray:
+        """Return a deterministic spin density."""
+        _ = mo_coeff, mo_occ
+        return np.array(
+            [
+                [[1.0, 0.0], [0.0, 0.0]],
+                [[1.0, 0.0], [0.0, 0.0]],
+            ],
+            dtype=float,
         )
 
-    monkeypatch.setattr(meanfield.optimize, "root", fake_root)
+    def get_fock(self, *, h1e: Any = None, **_kwargs: Any) -> Any:
+        """Return stacked alpha/beta Fock matrices."""
+        return np.stack([h1e, h1e])
 
-    system = ConstraintSystem(
-        names=["q_tot"],
-        kinds=["net_charge"],
-        targets=np.asarray([0.0], dtype=float),
-        operators=[np.eye(2, dtype=float)],
-        report_scales=np.asarray([-1.0], dtype=float),
-        report_offsets=np.asarray([0.0], dtype=float),
+    def kernel(self, *_args: Any, **_kwargs: Any) -> float:
+        """Return a fixed converged energy."""
+        self.converged = True
+        return -1.0
+
+
+def test_newton_switches_solver_mode() -> None:
+    """newton() should switch the wrapper into Newton-KKT mode."""
+    mf = CDFT(
+        DummyBaseMF(),
+        constraints=[
+            Constraint(
+                name="n_a",
+                fragments=[FragmentTerm(atoms=[0], coeff=1.0)],
+                target=1.0,
+            )
+        ],
+        solver=SolverOptions(mode="micro"),
     )
-    mf = DummyCDFT()
-    mf._init_cdft(constraint_system=system, initial_vc=[UNCHANGED_VC], vc_max_step=0.25)
-    base_fock = np.zeros((2, 2, 2), dtype=float)
-    overlap = np.eye(2, dtype=float)
-
-    mf._update_vc(base_fock=base_fock, overlap=overlap)
-    assert mf.vc[0] == UNCHANGED_VC
+    assert mf.solver_options.mode == "micro"
+    mf.newton()
+    assert mf.solver_options.mode == "newton_kkt"
 
 
-def test_update_vc_applies_bounded_step_on_success(monkeypatch) -> None:
-    """Even successful roots should move vc in bounded residual-improving steps."""
-
-    class DummyCDFT(_CDFTMixin):
-        def _density_from_fock(self: Any, fock: np.ndarray, overlap: np.ndarray) -> np.ndarray:
-            _ = overlap
-            return np.asarray(fock, dtype=float)
-
-    def fake_root(_objective, x0, **_kwargs):
-        return SimpleNamespace(
-            x=np.asarray([0.0], dtype=float),
-            success=True,
-            status=1,
-            nfev=1,
-        )
-
-    monkeypatch.setattr(meanfield.optimize, "root", fake_root)
-
-    system = ConstraintSystem(
-        names=["q_tot"],
-        kinds=["net_charge"],
-        targets=np.asarray([0.0], dtype=float),
-        operators=[np.eye(2, dtype=float)],
-        report_scales=np.asarray([-1.0], dtype=float),
-        report_offsets=np.asarray([0.0], dtype=float),
+def test_solver_fallback_records_used_mode() -> None:
+    """Solver state should record which mode produced best residual."""
+    mf = CDFT(
+        DummyBaseMF(),
+        constraints=[
+            Constraint(
+                name="n_a",
+                fragments=[FragmentTerm(atoms=[0], coeff=1.0)],
+                target=1.0,
+            )
+        ],
+        solver=SolverOptions(
+            mode="outer_newton",
+            fallback_modes=["outer_newton", "newton_kkt", "penalty", "micro"],
+        ),
     )
-    mf = DummyCDFT()
-    mf._init_cdft(constraint_system=system, initial_vc=[1.0], vc_max_step=0.25)
-    base_fock = np.zeros((2, 2, 2), dtype=float)
-    overlap = np.eye(2, dtype=float)
-
-    mf._update_vc(base_fock=base_fock, overlap=overlap)
-    assert mf.vc[0] == BOUNDED_VC
+    dm = mf.mf.make_rdm1()
+    h1e = mf.mf.get_hcore(mf.mf.mol)
+    s1e = mf.mf.get_ovlp(mf.mf.mol)
+    vhf = mf.mf.get_veff(mf.mf.mol, dm)
+    _ = mf.get_fock(h1e=h1e, s1e=s1e, vhf=vhf, dm=dm, cycle=0)
+    assert mf.solver_state["fallback_used"] in {"outer_newton", "newton_kkt", "penalty", "micro"}

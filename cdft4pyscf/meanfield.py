@@ -1,39 +1,26 @@
-"""Class-based constrained UKS mean-field objects."""
+"""Wrapper-first constrained mean-field objects."""
 
 from __future__ import annotations
 
-import importlib
 import logging
+from types import MethodType
 from typing import Any
 
 import numpy as np
-from pyscf.dft import uks as pyscf_uks
 from scipy import optimize
+from scipy.sparse.linalg import minres
 
 from cdft4pyscf.constraints import (
-    ConstraintSystem,
     build_constraint_system,
     evaluate_constraint_residuals,
     evaluate_constraint_values,
     report_constraint_residuals,
     report_constraint_values,
 )
-from cdft4pyscf.exceptions import BackendUnavailableError, ConvergenceError
+from cdft4pyscf.exceptions import ConvergenceError
+from cdft4pyscf.models import Constraint, SolverOptions
 
-
-def _cupy_module() -> Any | None:
-    try:
-        cp = importlib.import_module("cupy")
-    except Exception:
-        return None
-    return cp
-
-
-def _is_cupy_array(value: Any) -> bool:
-    cp = _cupy_module()
-    if cp is None:
-        return False
-    return isinstance(value, cp.ndarray)
+LOGGER = logging.getLogger(__name__)
 
 
 def _to_numpy_array(value: Any) -> np.ndarray:
@@ -46,220 +33,219 @@ def _to_numpy_array(value: Any) -> np.ndarray:
     return np.asarray(value)
 
 
-def _to_backend_array(reference: Any, value: np.ndarray) -> Any:
-    """Convert a NumPy array to the backend type of reference."""
-    if _is_cupy_array(reference):
-        cp = _cupy_module()
-        if cp is not None:
-            return cp.asarray(value)
-    return np.asarray(value)
+class CDFT:
+    """Wrapper-first cDFT interface around an existing mean-field object."""
 
-
-def _stack_spin_matrices(alpha: Any, beta: Any) -> Any:
-    """Stack alpha/beta spin matrices while preserving backend arrays when possible."""
-    if _is_cupy_array(alpha) and _is_cupy_array(beta):
-        cp = _cupy_module()
-        if cp is not None:
-            return cp.stack([alpha, beta])
-    return np.stack([_to_numpy_array(alpha), _to_numpy_array(beta)])
-
-
-class _CDFTMixin:
-    """Mixin that injects cDFT multiplier updates into UKS get_fock()."""
-
-    _keys = frozenset(
-        {
-            "constraint_system",
-            "vc",
-            "cdft_conv_tol",
-            "cdft_vc_tol",
-            "cdft_vc_max_cycle",
-            "cdft_vc_max_step",
-            "cdft_inner_calls",
-            "cdft_last_values",
-            "cdft_last_residuals",
-            "cdft_residual_norm",
-            "cdft_log_inner_solver",
-            "cdft_raise_on_unconverged",
-            "cdft_messages",
-        }
-    )
-
-    def _init_cdft(
+    def __init__(
         self,
+        mf: Any,
         *,
-        constraint_system: ConstraintSystem,
-        initial_vc: np.ndarray | list[float] | None = None,
-        conv_tol: float = 1e-7,
-        vc_tol: float = 1e-6,
-        vc_max_cycle: int = 50,
-        vc_max_step: float = 0.25,
-        log_inner_solver: bool = False,
-        raise_on_unconverged: bool = True,
+        constraints: list[Constraint],
+        solver: SolverOptions | None = None,
     ) -> None:
-        self.constraint_system = constraint_system
-        n_constraints = len(constraint_system.names)
-        if initial_vc is None:
-            self.vc = np.zeros(n_constraints, dtype=float)
+        object.__setattr__(self, "mf", mf)
+        object.__setattr__(self, "constraints", constraints)
+        object.__setattr__(self, "solver_options", solver or SolverOptions())
+
+        overlap = np.asarray(mf.get_ovlp(mf.mol), dtype=float)
+        system = build_constraint_system(
+            constraints=constraints,
+            mol=mf.mol,
+            ao_slices=mf.mol.aoslice_by_atom(),
+            atom_charges=np.asarray(mf.mol.atom_charges(), dtype=float),
+            overlap=overlap,
+        )
+        object.__setattr__(self, "constraint_system", system)
+
+        n_constraints = len(system.names)
+        initial = self.solver_options.initial_v_lagrange
+        if initial is None:
+            initial_v = np.zeros(n_constraints, dtype=float)
         else:
-            vc = np.asarray(initial_vc, dtype=float)
-            if vc.shape != (n_constraints,):
+            initial_v = np.asarray(initial, dtype=float)
+            if initial_v.shape != (n_constraints,):
                 msg = (
-                    "initial_vc length must match number of constraints "
-                    f"({n_constraints}); got {int(vc.size)}"
+                    "initial_v_lagrange length must match number of constraints "
+                    f"({n_constraints}); got {int(initial_v.size)}"
                 )
                 raise ValueError(msg)
-            self.vc = vc
-
-        self.cdft_conv_tol = float(conv_tol)
-        self.cdft_vc_tol = float(vc_tol)
-        self.cdft_vc_max_cycle = int(vc_max_cycle)
-        self.cdft_vc_max_step = max(float(vc_max_step), 0.0)
-        self.cdft_log_inner_solver = bool(log_inner_solver)
-        self.cdft_raise_on_unconverged = bool(raise_on_unconverged)
-
-        self.cdft_inner_calls = 0
-        self.cdft_last_values = np.zeros(n_constraints, dtype=float)
-        self.cdft_last_residuals = np.zeros(n_constraints, dtype=float)
-        self.cdft_residual_norm = float("inf")
-        self.cdft_messages: list[str] = []
-
-    def _constraint_operator(self, vc: np.ndarray) -> np.ndarray:
-        operator = np.zeros_like(self.constraint_system.operators[0])
-        for multiplier, weight in zip(vc, self.constraint_system.operators, strict=True):
-            operator = operator + (float(multiplier) * weight)
-        return operator
-
-    def _density_from_fock(self: Any, fock: np.ndarray, overlap: np.ndarray) -> np.ndarray:
-        mo_energy, mo_coeff = self.eig(fock, overlap)
-        mo_occ = self.get_occ(mo_energy, mo_coeff)
-        return self.make_rdm1(mo_coeff, mo_occ)
-
-    def _update_vc(self, *, base_fock: np.ndarray, overlap: np.ndarray) -> None:
-        if len(self.constraint_system.names) == 0:
-            return
-
-        dm_cache: np.ndarray | None = None
-        values_cache: np.ndarray | None = None
-        residuals_cache: np.ndarray | None = None
-
-        def emit(msg: str) -> None:
-            if self.cdft_log_inner_solver:
-                print(msg)
-                self.cdft_messages.append(msg)
-
-        def objective(vc: np.ndarray) -> np.ndarray:
-            nonlocal dm_cache, values_cache, residuals_cache
-            operator = self._constraint_operator(vc)
-            operator_like = _to_backend_array(base_fock[0], operator)
-            constrained_fock = _stack_spin_matrices(
-                base_fock[0] + operator_like,
-                base_fock[1] + operator_like,
-            )
-            dm = self._density_from_fock(constrained_fock, overlap)
-            values = evaluate_constraint_values(
-                _to_numpy_array(dm[0] + dm[1]),
-                self.constraint_system,
-            )
-            residuals = values - self.constraint_system.targets
-            dm_cache = dm
-            values_cache = values
-            residuals_cache = residuals
-            if self.cdft_log_inner_solver:
-                vc_fmt = np.array2string(np.asarray(vc, dtype=float), precision=8, separator=", ")
-                val_fmt = np.array2string(
-                    np.asarray(values, dtype=float), precision=8, separator=", "
-                )
-                res_fmt = np.array2string(
-                    np.asarray(residuals, dtype=float), precision=8, separator=", "
-                )
-                emit(f"[cDFT][inner-eval] vc={vc_fmt} values={val_fmt} residuals={res_fmt}")
-                for name, value, target in zip(
-                    self.constraint_system.names,
-                    np.asarray(values, dtype=float),
-                    np.asarray(self.constraint_system.targets, dtype=float),
-                    strict=True,
-                ):
-                    emit(
-                        f"[cDFT][inner-eval] {name} value={float(value): .8f} "
-                        f"target={float(target): .8f}"
-                    )
-            return residuals
-
-        result = optimize.root(
-            objective,
-            self.vc,
-            method="hybr",
-            options={"xtol": self.cdft_vc_tol, "maxfev": self.cdft_vc_max_cycle},
+        object.__setattr__(self, "v_lagrange", initial_v)
+        object.__setattr__(self, "converged", False)
+        object.__setattr__(
+            self,
+            "solver_state",
+            {
+                "mode": self.solver_options.mode,
+                "fallback_used": None,
+                "inner_solver_evaluations": 0,
+                "residual_norm": float("inf"),
+                "trace_messages": [],
+            },
         )
-        logging.info(f"cDFT inner solver result: {result}")
-        self.cdft_inner_calls += int(result.nfev)
-        previous_vc = np.asarray(self.vc, dtype=float)
-        previous_residuals = objective(previous_vc)
-        previous_norm = float(np.linalg.norm(previous_residuals))
+        object.__setattr__(self, "_last_residuals", np.zeros(n_constraints, dtype=float))
+        object.__setattr__(self, "_orig_get_fock", mf.get_fock)
+        mf.get_fock = MethodType(CDFT._patched_get_fock, self)
 
-        candidate_vc = np.asarray(result.x, dtype=float)
-        delta = candidate_vc - previous_vc
-        if self.cdft_vc_max_step > 0.0:
-            delta = np.clip(delta, -self.cdft_vc_max_step, self.cdft_vc_max_step)
+    def __getattr__(self, name: str) -> Any:
+        """Delegate unknown attributes to the wrapped mean-field object."""
+        return getattr(self.mf, name)
 
-        trial_scales = (1.0, 0.5, 0.25, 0.1)
-        best_vc = previous_vc
-        best_norm = previous_norm
-        for scale in trial_scales:
-            trial_vc = previous_vc + (scale * delta)
-            trial_residuals = objective(trial_vc)
-            trial_norm = float(np.linalg.norm(trial_residuals))
-            self.cdft_inner_calls += 1
-            if trial_norm < best_norm:
-                best_vc = trial_vc
-                best_norm = trial_norm
-
-        if bool(result.success):
-            accepted_vc = best_vc
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Store wrapper attributes locally and delegate everything else."""
+        own = {
+            "mf",
+            "constraints",
+            "solver_options",
+            "constraint_system",
+            "v_lagrange",
+            "converged",
+            "solver_state",
+            "_last_residuals",
+            "_orig_get_fock",
+        }
+        if name in own:
+            object.__setattr__(self, name, value)
         else:
-            accepted_vc = best_vc if (best_norm < previous_norm) else previous_vc
-            if self.cdft_log_inner_solver:
-                emit(
-                    "[cDFT][inner] root solver reported failure; "
-                    "using best residual-improving damped step."
-                )
+            setattr(self.mf, name, value)
 
-        self.vc = np.asarray(accepted_vc, dtype=float)
+    def build_projectors(self) -> list[np.ndarray]:
+        """Return dense AO projectors for all constraints."""
+        return [operator.as_dense() for operator in self.constraint_system.operators]
 
-        if values_cache is None:
-            operator = self._constraint_operator(self.vc)
-            operator_like = _to_backend_array(base_fock[0], operator)
-            constrained_fock = _stack_spin_matrices(
-                base_fock[0] + operator_like,
-                base_fock[1] + operator_like,
-            )
-            dm_cache = self._density_from_fock(constrained_fock, overlap)
-            values_cache = evaluate_constraint_values(
-                _to_numpy_array(dm_cache[0] + dm_cache[1]),
-                self.constraint_system,
-            )
-            residuals_cache = values_cache - self.constraint_system.targets
+    def _constraint_operator(self, multipliers: np.ndarray) -> np.ndarray:
+        dense = np.zeros_like(self.constraint_system.operators[0].as_dense())
+        for multiplier, operator in zip(multipliers, self.constraint_system.operators, strict=True):
+            dense += float(multiplier) * operator.as_dense()
+        return dense
 
-        self.cdft_last_values = np.asarray(values_cache, dtype=float)
-        self.cdft_last_residuals = self.cdft_last_values - self.constraint_system.targets
-        self.cdft_residual_norm = float(np.linalg.norm(self.cdft_last_residuals))
-        if self.cdft_log_inner_solver:
-            vc_fmt = np.array2string(self.vc, precision=8, separator=", ")
-            val_fmt = np.array2string(self.cdft_last_values, precision=8, separator=", ")
-            res_array = np.asarray(
-                residuals_cache if residuals_cache is not None else self.cdft_last_residuals
-            )
-            res_fmt = np.array2string(res_array, precision=8, separator=", ")
+    def _density_from_fock(self, fock: np.ndarray, overlap: np.ndarray) -> np.ndarray:
+        mo_energy, mo_coeff = self.mf.eig(fock, overlap)
+        mo_occ = self.mf.get_occ(mo_energy, mo_coeff)
+        return np.asarray(self.mf.make_rdm1(mo_coeff, mo_occ), dtype=float)
+
+    def _evaluate_residual_for_multipliers(
+        self, multipliers: np.ndarray, base_fock: np.ndarray, overlap: np.ndarray
+    ) -> np.ndarray:
+        operator = self._constraint_operator(multipliers)
+        constrained_fock = np.stack([base_fock[0] + operator, base_fock[1] + operator])
+        dm = self._density_from_fock(constrained_fock, overlap)
+        values = evaluate_constraint_values(dm[0] + dm[1], self.constraint_system)
+        return values - self.constraint_system.targets
+
+    def _micro_step(self, base_fock: np.ndarray, overlap: np.ndarray) -> np.ndarray:
+        result = optimize.root(
+            lambda v: self._evaluate_residual_for_multipliers(v, base_fock, overlap),
+            self.v_lagrange,
+            method="hybr",
+            options={
+                "xtol": self.solver_options.inner_vc_tol,
+                "maxfev": self.solver_options.inner_vc_max_cycle,
+            },
+        )
+        self.solver_state["inner_solver_evaluations"] += int(result.nfev)
+        delta = np.asarray(result.x, dtype=float) - self.v_lagrange
+        step = float(self.solver_options.max_v_step)
+        if step > 0.0:
+            delta = np.clip(delta, -step, step)
+        return self.v_lagrange + delta
+
+    def _outer_newton_step(self, base_fock: np.ndarray, overlap: np.ndarray) -> np.ndarray:
+        v0 = np.asarray(self.v_lagrange, dtype=float)
+        r0 = self._evaluate_residual_for_multipliers(v0, base_fock, overlap)
+        n_constraints = len(v0)
+        jac = np.zeros((n_constraints, n_constraints), dtype=float)
+        eps = 1e-3
+        for index in range(n_constraints):
+            probe = v0.copy()
+            probe[index] += eps
+            jac[:, index] = (
+                self._evaluate_residual_for_multipliers(probe, base_fock, overlap) - r0
+            ) / eps
+        try:
+            delta = np.linalg.solve(jac, -r0)
+        except np.linalg.LinAlgError:
+            delta, *_ = np.linalg.lstsq(jac, -r0, rcond=None)
+        delta *= float(self.solver_options.damping)
+        step = float(self.solver_options.max_v_step)
+        if step > 0.0:
+            delta = np.clip(delta, -step, step)
+        return v0 + delta
+
+    def _newton_kkt_step(self, base_fock: np.ndarray, overlap: np.ndarray) -> np.ndarray:
+        v0 = np.asarray(self.v_lagrange, dtype=float)
+        r0 = self._evaluate_residual_for_multipliers(v0, base_fock, overlap)
+        n_constraints = len(v0)
+        jac = np.zeros((n_constraints, n_constraints), dtype=float)
+        eps = 1e-3
+        for index in range(n_constraints):
+            probe = v0.copy()
+            probe[index] += eps
+            jac[:, index] = (
+                self._evaluate_residual_for_multipliers(probe, base_fock, overlap) - r0
+            ) / eps
+        kkt = jac.T @ jac + np.eye(n_constraints, dtype=float) * 1e-8
+        rhs = -jac.T @ r0
+        delta, _ = minres(kkt, rhs, rtol=self.solver_options.inner_vc_tol, maxiter=50)
+        trust_radius = float(self.solver_options.max_v_step) * max(
+            1.0, np.sqrt(float(n_constraints))
+        )
+        norm = float(np.linalg.norm(delta))
+        if norm > trust_radius and norm > 0.0:
+            delta *= trust_radius / norm
+        return v0 + delta
+
+    def _penalty_step(self, base_fock: np.ndarray, overlap: np.ndarray) -> np.ndarray:
+        residuals = self._evaluate_residual_for_multipliers(self.v_lagrange, base_fock, overlap)
+        update = -2.0 * float(self.solver_options.penalty_lambda) * residuals
+        update *= float(self.solver_options.damping)
+        step = float(self.solver_options.max_v_step)
+        if step > 0.0:
+            update = np.clip(update, -step, step)
+        return self.v_lagrange + update
+
+    def _solve_multipliers(self, base_fock: np.ndarray, overlap: np.ndarray) -> None:
+        modes = [self.solver_options.mode, *self.solver_options.fallback_modes]
+        best_v = np.asarray(self.v_lagrange, dtype=float)
+        best_r = self._evaluate_residual_for_multipliers(best_v, base_fock, overlap)
+        best_norm = float(np.linalg.norm(best_r))
+        used_mode = None
+
+        for mode in modes:
+            if mode == "micro":
+                candidate = self._micro_step(base_fock, overlap)
+            elif mode == "outer_newton":
+                candidate = self._outer_newton_step(base_fock, overlap)
+            elif mode == "newton_kkt":
+                candidate = self._newton_kkt_step(base_fock, overlap)
+            elif mode == "penalty":
+                candidate = self._penalty_step(base_fock, overlap)
+            else:
+                continue
+            residuals = self._evaluate_residual_for_multipliers(candidate, base_fock, overlap)
+            norm = float(np.linalg.norm(residuals))
+            if norm <= best_norm:
+                best_v = np.asarray(candidate, dtype=float)
+                best_r = np.asarray(residuals, dtype=float)
+                best_norm = norm
+                used_mode = mode
+            if best_norm <= self.solver_options.conv_tol_constraint:
+                break
+
+        self.v_lagrange = best_v
+        self._last_residuals = best_r
+        self.solver_state["mode"] = self.solver_options.mode
+        self.solver_state["fallback_used"] = used_mode
+        self.solver_state["residual_norm"] = best_norm
+        if self.solver_options.trace:
             msg = (
-                f"[cDFT][inner] success={bool(result.success)} status={int(result.status)} "
-                f"nfev={int(result.nfev)} residual_norm={self.cdft_residual_norm:.3e}"
+                f"[cDFT] multiplier solve mode={used_mode} residual_norm={best_norm:.3e} "
+                f"v_lagrange={np.array2string(self.v_lagrange, precision=6, separator=', ')}"
             )
-            emit(msg)
-            emit(f"[cDFT][inner-final] vc={vc_fmt} values={val_fmt} residuals={res_fmt}")
+            LOGGER.info(msg)
+            self.solver_state["trace_messages"].append(msg)
 
-    def get_fock(
-        self: Any,
+    def _patched_get_fock(
+        self,
         h1e: Any | None = None,
         s1e: Any | None = None,
         vhf: Any | None = None,
@@ -272,22 +258,23 @@ class _CDFTMixin:
         fock_last: Any | None = None,
     ) -> Any:
         if h1e is None:
-            h1e = self.get_hcore(self.mol)
+            h1e = self.mf.get_hcore(self.mf.mol)
         if vhf is None:
-            vhf = self.get_veff(self.mol, dm)
+            vhf = self.mf.get_veff(self.mf.mol, dm)
         if s1e is None:
-            s1e = self.get_ovlp(self.mol)
+            s1e = self.mf.get_ovlp(self.mf.mol)
         if dm is None:
-            dm = self.make_rdm1()
+            dm = self.mf.make_rdm1()
 
-        base_fock = _stack_spin_matrices(h1e + vhf[0], h1e + vhf[1])
+        h1e_np = _to_numpy_array(h1e)
+        vhf_np = _to_numpy_array(vhf)
+        base_fock = np.stack([h1e_np + vhf_np[0], h1e_np + vhf_np[1]])
         if cycle >= 0:
-            self._update_vc(base_fock=base_fock, overlap=s1e)
+            self._solve_multipliers(base_fock, _to_numpy_array(s1e))
 
-        operator = self._constraint_operator(self.vc)
-        h1e_eff = h1e + _to_backend_array(h1e, operator)
-        super_obj: Any = super()
-        return super_obj.get_fock(
+        operator = self._constraint_operator(self.v_lagrange)
+        h1e_eff = h1e_np + operator
+        return self._orig_get_fock(
             h1e=h1e_eff,
             s1e=s1e,
             vhf=vhf,
@@ -300,206 +287,61 @@ class _CDFTMixin:
             fock_last=fock_last,
         )
 
-    def constraint_values(self: Any, dm: np.ndarray | None = None) -> dict[str, float]:
+    def constraint_values(self, dm: np.ndarray | None = None) -> dict[str, float]:
+        """Return user-facing constraint values keyed by constraint name."""
         if dm is None:
-            dm = self.make_rdm1()
-        values = evaluate_constraint_values(_to_numpy_array(dm[0] + dm[1]), self.constraint_system)
-        values = report_constraint_values(values, self.constraint_system)
+            dm = np.asarray(self.mf.make_rdm1(), dtype=float)
+        raw = evaluate_constraint_values(dm[0] + dm[1], self.constraint_system)
+        shown = report_constraint_values(raw, self.constraint_system)
         return {
             name: float(value)
-            for name, value in zip(self.constraint_system.names, values, strict=True)
+            for name, value in zip(self.constraint_system.names, shown, strict=True)
         }
 
-    def constraint_residuals(self: Any, dm: np.ndarray | None = None) -> dict[str, float]:
+    def constraint_residuals(self, dm: np.ndarray | None = None) -> dict[str, float]:
+        """Return user-facing residual values keyed by constraint name."""
         if dm is None:
-            dm = self.make_rdm1()
-        residuals = evaluate_constraint_residuals(
-            _to_numpy_array(dm[0] + dm[1]),
-            self.constraint_system,
-        )
-        residuals = report_constraint_residuals(residuals, self.constraint_system)
+            dm = np.asarray(self.mf.make_rdm1(), dtype=float)
+        raw = evaluate_constraint_residuals(dm[0] + dm[1], self.constraint_system)
+        shown = report_constraint_residuals(raw, self.constraint_system)
         return {
             name: float(value)
-            for name, value in zip(self.constraint_system.names, residuals, strict=True)
+            for name, value in zip(self.constraint_system.names, shown, strict=True)
         }
 
-    def multiplier_by_constraint(self) -> dict[str, float]:
-        return {
-            name: float(value)
-            for name, value in zip(self.constraint_system.names, self.vc, strict=True)
-        }
+    def get_canonical_mo(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return canonical orbitals from unconstrained Fock at constrained density."""
+        dm = self.mf.make_rdm1()
+        h1e = self.mf.get_hcore(self.mf.mol)
+        vhf = self.mf.get_veff(self.mf.mol, dm)
+        overlap = self.mf.get_ovlp(self.mf.mol)
+        fock = np.stack([h1e + vhf[0], h1e + vhf[1]])
+        return self.mf.eig(fock, overlap)
 
-    def _refresh_cdft_state_from_dm(self, dm: np.ndarray) -> None:
-        """Refresh cached cDFT values/residuals from a total density matrix."""
-        total_density = _to_numpy_array(dm[0] + dm[1])
-        values = evaluate_constraint_values(total_density, self.constraint_system)
-        residuals = evaluate_constraint_residuals(total_density, self.constraint_system)
-        self.cdft_last_values = np.asarray(values, dtype=float)
-        self.cdft_last_residuals = np.asarray(residuals, dtype=float)
-        self.cdft_residual_norm = float(np.linalg.norm(self.cdft_last_residuals))
+    def newton(self) -> "CDFT":
+        """Switch to coupled Newton-KKT mode and return self."""
+        self.solver_options.mode = "newton_kkt"
+        return self
 
-    def _recover_cdft_after_scf(self: Any, dm: np.ndarray) -> tuple[np.ndarray, bool]:
-        """Run bounded post-SCF recovery steps to satisfy cDFT residual tolerance."""
-        max_recovery_steps = max(int(getattr(self, "max_cycle", 1)), 1)
-        h1e = self.get_hcore(self.mol)
-        overlap = self.get_ovlp(self.mol)
-
-        current_dm = dm
-        for _ in range(max_recovery_steps):
-            vhf = self.get_veff(self.mol, current_dm)
-            base_fock = _stack_spin_matrices(h1e + vhf[0], h1e + vhf[1])
-            self._update_vc(base_fock=base_fock, overlap=overlap)
-
-            operator = self._constraint_operator(self.vc)
-            operator_like = _to_backend_array(base_fock[0], operator)
-            constrained_fock = _stack_spin_matrices(
-                base_fock[0] + operator_like,
-                base_fock[1] + operator_like,
-            )
-            mo_energy, mo_coeff = self.eig(constrained_fock, overlap)
-            mo_occ = self.get_occ(mo_energy, mo_coeff)
-            current_dm = self.make_rdm1(mo_coeff, mo_occ)
-            self.mo_energy = mo_energy
-            self.mo_coeff = mo_coeff
-            self.mo_occ = mo_occ
-            self._refresh_cdft_state_from_dm(current_dm)
-            if self.cdft_residual_norm <= self.cdft_conv_tol:
-                break
-
-        if hasattr(self, "energy_tot"):
-            vhf = self.get_veff(self.mol, current_dm)
-            self.e_tot = float(self.energy_tot(dm=current_dm, h1e=h1e, vhf=vhf))
-        converged = bool(self.cdft_residual_norm <= self.cdft_conv_tol)
-        return current_dm, converged
-
-    def kernel(self: Any, *args: Any, **kwargs: Any) -> float:
-        super_obj: Any = super()
-        energy = float(super_obj.kernel(*args, **kwargs))
-        dm = self.make_rdm1()
-        self._refresh_cdft_state_from_dm(dm)
-        scf_converged = bool(self.converged)
-        cdft_converged = bool(self.cdft_residual_norm <= self.cdft_conv_tol)
-        if scf_converged and not cdft_converged:
-            _, cdft_converged = self._recover_cdft_after_scf(dm)
-            energy = float(getattr(self, "e_tot", energy))
-
+    def kernel(self, *args: Any, **kwargs: Any) -> float:
+        """Run constrained SCF and enforce both SCF and constraint convergence."""
+        energy = float(self.mf.kernel(*args, **kwargs))
+        dm = np.asarray(self.mf.make_rdm1(), dtype=float)
+        residuals = evaluate_constraint_residuals(dm[0] + dm[1], self.constraint_system)
+        residual_norm = float(np.linalg.norm(residuals))
+        scf_converged = bool(self.mf.converged)
+        cdft_converged = bool(residual_norm <= self.solver_options.conv_tol_constraint)
+        self._last_residuals = np.asarray(residuals, dtype=float)
+        self.solver_state["residual_norm"] = residual_norm
         self.converged = bool(scf_converged and cdft_converged)
-        if (not self.converged) and self.cdft_raise_on_unconverged:
+        if not self.converged:
             diagnostics = [
                 f"scf_converged={scf_converged}",
-                f"constraint_residual_norm={self.cdft_residual_norm:.3e}",
+                f"constraint_residual_norm={residual_norm:.3e}",
+                f"constraint_tol={self.solver_options.conv_tol_constraint:.3e}",
             ]
             raise ConvergenceError(
                 "cDFT kernel did not satisfy convergence criteria.",
                 diagnostics=diagnostics,
             )
         return energy
-
-
-class CDFT_UKS(_CDFTMixin, pyscf_uks.UKS):  # noqa: N801
-    """Class-first constrained UKS object for PySCF CPU workflows."""
-
-    def __init__(
-        self,
-        mol: Any,
-        *,
-        constraints: list[Any],
-        population_basis: str = "lowdin",
-        initial_vc: np.ndarray | list[float] | None = None,
-        conv_tol: float = 1e-7,
-        vc_tol: float = 1e-6,
-        vc_max_cycle: int = 50,
-        vc_max_step: float = 0.25,
-        log_inner_solver: bool = False,
-        raise_on_unconverged: bool = True,
-    ) -> None:
-        super().__init__(mol)
-        system = build_constraint_system(
-            constraints=constraints,
-            mol=mol,
-            ao_slices=mol.aoslice_by_atom(),
-            atom_charges=np.asarray(mol.atom_charges(), dtype=float),
-            population_basis=population_basis,
-        )
-        self._init_cdft(
-            constraint_system=system,
-            initial_vc=initial_vc,
-            conv_tol=conv_tol,
-            vc_tol=vc_tol,
-            vc_max_cycle=vc_max_cycle,
-            vc_max_step=vc_max_step,
-            log_inner_solver=log_inner_solver,
-            raise_on_unconverged=raise_on_unconverged,
-        )
-
-
-def _build_cdft_uks_gpu_class(base_gpu_uks: type[Any]) -> type[Any]:
-    class _CDFT_UKS_GPU(_CDFTMixin, base_gpu_uks):  # noqa: N801
-        """Class-first constrained UKS object for GPU4PySCF workflows."""
-
-        def __init__(
-            self,
-            mol: Any,
-            *,
-            constraints: list[Any],
-            population_basis: str = "lowdin",
-            initial_vc: np.ndarray | list[float] | None = None,
-            conv_tol: float = 1e-7,
-            vc_tol: float = 1e-6,
-            vc_max_cycle: int = 50,
-            vc_max_step: float = 0.25,
-            log_inner_solver: bool = False,
-            raise_on_unconverged: bool = True,
-        ) -> None:
-            super().__init__(mol)
-            system = build_constraint_system(
-                constraints=constraints,
-                mol=mol,
-                ao_slices=mol.aoslice_by_atom(),
-                atom_charges=np.asarray(mol.atom_charges(), dtype=float),
-                population_basis=population_basis,
-            )
-            self._init_cdft(
-                constraint_system=system,
-                initial_vc=initial_vc,
-                conv_tol=conv_tol,
-                vc_tol=vc_tol,
-                vc_max_cycle=vc_max_cycle,
-                vc_max_step=vc_max_step,
-                log_inner_solver=log_inner_solver,
-                raise_on_unconverged=raise_on_unconverged,
-            )
-
-    _CDFT_UKS_GPU.__name__ = "CDFT_UKS_GPU"
-    _CDFT_UKS_GPU.__qualname__ = "CDFT_UKS_GPU"
-    return _CDFT_UKS_GPU
-
-
-try:
-    _gpu_uks = importlib.import_module("gpu4pyscf.dft.uks")
-except Exception:
-    _gpu_uks = None
-
-if _gpu_uks is not None:
-    CDFT_UKS_GPU = _build_cdft_uks_gpu_class(_gpu_uks.UKS)
-else:
-
-    class CDFT_UKS_GPU:  # noqa: N801
-        """Placeholder that raises when GPU4PySCF is unavailable."""
-
-        max_cycle: int
-        conv_tol: float
-        xc: str
-        disp: str
-        chkfile: Any
-        init_guess: str
-        verbose: int
-
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            msg = "GPU backend requested but gpu4pyscf could not be imported."
-            raise BackendUnavailableError(msg)
-
-        def kernel(self, *_args: Any, **_kwargs: Any) -> float:
-            """Raise a typed error when GPU kernel execution is unavailable."""
-            msg = "GPU backend requested but gpu4pyscf could not be imported."
-            raise BackendUnavailableError(msg)

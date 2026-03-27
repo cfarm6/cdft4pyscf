@@ -1,10 +1,10 @@
 [project]
 name = "cdft4pyscf"
-description = "cdft4pyscf"
+description = "Constrained density functional theory workflows for PySCF"
 license = "MIT"
 version = "0.1.0"
 readme = "README.md"
-keywords = []
+keywords = ["pyscf", "dft", "cdft", "electronic-structure", "quantum-chemistry"]
 authors = [{name = "Carson Farmer"}]
 requires-python = ">=3.12"
 dependencies = [

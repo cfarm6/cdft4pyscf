@@ -4,6 +4,83 @@
 [Powered by: Pixi](https://pixi.sh)
 [Code style: ruff](https://github.com/astral-sh/ruff)
 [Typing: ty](https://github.com/astral-sh/ty)
+
+## Description
+
+`cdft4pyscf` provides constrained density functional theory (cDFT) workflows on top of PySCF and optional GPU4PySCF backends.
+
+This release follows the wrapper-first interface from `DETAILS.md`:
+
+- `CDFT(mf, constraints=[...], solver=...)` as the primary entry point
+- linear-combination constraints via signed `FragmentTerm` coefficients
+- electron and net-charge targets with internal electron-target normalization
+- projector backends: `mulliken`, `lowdin`, `minao`, `iao`, `lo:boys`, `lo:pm`, `lo:er`, `becke`
+- solver modes: `micro`, `outer_newton`, `newton_kkt`, `penalty` with fallback sequencing
+
+## Usage
+
+```python
+from pyscf import dft, gto
+
+from cdft4pyscf import CDFT, Constraint, FragmentTerm, ProjectorSpec, SolverOptions
+
+mol = gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g", spin=0, charge=0, verbose=0)
+base = dft.UKS(mol)
+base.xc = "lda,vwn"
+
+mf = CDFT(
+    base,
+    constraints=[
+        Constraint(
+            name="delta_N",
+            fragments=[
+                FragmentTerm(atoms=[0], coeff=+1.0),
+                FragmentTerm(atoms=[1], coeff=-1.0),
+            ],
+            target=0.0,
+            target_type="electrons",
+            projector=ProjectorSpec(method="minao"),
+        ),
+    ],
+    solver=SolverOptions(mode="micro", conv_tol_constraint=1e-6),
+)
+
+energy = mf.kernel()
+print(mf.converged, energy, mf.constraint_values(), mf.v_lagrange)
+```
+
+## Installation
+
+```bash
+pip install -e .
+```
+
+GPU support is optional:
+
+```bash
+pip install -e ".[gpu]"
+```
+
+## Example Scripts
+
+- `examples/h2o_electron_number.py` - atom electron constraints
+- `examples/atcne_net_charge.py` - donor/acceptor electron-difference constraint
+- `examples/fa-aq_example.py` - projector backend comparison
+
+## Convergence semantics
+
+`CDFT.converged` is true only when both:
+
+- underlying SCF converges, and
+- max constraint residual satisfies `solver.conv_tol_constraint`
+
+If either condition fails, `kernel()` raises `ConvergenceError` with diagnostics.
+# cdft4pyscf
+
+[License](https://github.com/cfarm6/cdft4pyscf/blob/master/LICENSE)
+[Powered by: Pixi](https://pixi.sh)
+[Code style: ruff](https://github.com/astral-sh/ruff)
+[Typing: ty](https://github.com/astral-sh/ty)
 [GitHub Workflow Status](https://github.com/cfarm6/cdft4pyscf/actions/)
 [Codecov](https://codecov.io/gh/cfarm6/cdft4pyscf)
 
@@ -83,12 +160,11 @@ The project docs are configured with Zensical.
 
 The source pages live under `docs/`, and configuration is in `zensical.toml`.
 
-## Example Script
+## Example Scripts
 
-A more complete example in the style of the PySCF advanced cDFT example is
-available at:
-
-- `examples/033_constrained_dft.py`
+- `examples/h2o_electron_number.py`
+- `examples/atcne_net_charge.py`
+- `examples/fa-aq_example.py`
 
 ## Algorithm Notes
 
@@ -127,7 +203,8 @@ multiplier jumps from failed inner solves.
 
 ## Convergence and Failure Behavior
 
-- SCF and cDFT tolerances are configurable on the mean-field object.
+- SCF and cDFT tolerances are configurable with explicit names:
+  `mf.conv_tol` for SCF and `constraint_conv_tol` for cDFT residual convergence.
 - `vc_max_step` controls the maximum per-constraint `Vc` step accepted each
   inner update (`0.25` by default).
 - Fractional electron targets are treated as continuous target values during `Vc` root solving.

@@ -1,11 +1,11 @@
 #!/usr/bin/env python
-"""Constrained DFT example using class-first kernel workflows."""
+"""Water cDFT example with wrapper-first API."""
 
 from __future__ import annotations
 
-from pyscf import gto
+from pyscf import dft, gto
 
-from cdft4pyscf import CDFT_UKS, ConstraintSpec, RegionSpec
+from cdft4pyscf import CDFT, Constraint, FragmentTerm, ProjectorSpec, SolverOptions
 from cdft4pyscf.exceptions import ConvergenceError
 
 
@@ -16,31 +16,37 @@ def main() -> None:
         H    0.   0.757    0.587"""
 
     mol = gto.M(atom=atom, basis="6-31g", charge=0, spin=0, verbose=3)
-    mf = CDFT_UKS(
-        mol,
+    base = dft.UKS(mol)
+    base.xc = "b3lyp"
+    base.max_cycle = 80
+
+    mf = CDFT(
+        base,
         constraints=[
-            ConstraintSpec(
+            Constraint(
                 name="n_oxygen_fragment",
-                kind="electron_number",
+                fragments=[FragmentTerm(atoms=[0], coeff=1.0)],
                 target=8.2,
-                region=RegionSpec(name="oxygen_fragment", atom_indices=[0]),
+                target_type="electrons",
+                projector=ProjectorSpec(method="iao"),
             ),
-            ConstraintSpec(
+            Constraint(
                 name="n_hydrogen_fragment",
-                kind="electron_number",
+                fragments=[FragmentTerm(atoms=[1], coeff=1.0)],
                 target=0.6,
-                region=RegionSpec(name="hydrogen_fragment", atom_indices=[1]),
+                target_type="electrons",
+                projector=ProjectorSpec(method="iao"),
             ),
         ],
-        population_basis="iao",
-        initial_vc=[0.25, 0.001],
-        conv_tol=1e-7,
-        vc_tol=1e-7,
-        vc_max_cycle=80,
-        log_inner_solver=True,
+        solver=SolverOptions(
+            mode="micro",
+            initial_v_lagrange=[0.25, 0.001],
+            conv_tol_constraint=1e-7,
+            inner_vc_tol=1e-7,
+            inner_vc_max_cycle=80,
+            trace=True,
+        ),
     )
-    mf.xc = "b3lyp"
-    mf.max_cycle = 80
 
     try:
         total_energy = mf.kernel()
@@ -51,7 +57,7 @@ def main() -> None:
     print("Converged:", mf.converged)
     print("Total energy (Eh):", total_energy)
     print("Constraint values:", mf.constraint_values())
-    print("Lagrange multipliers (Vc):", mf.multiplier_by_constraint())
+    print("Lagrange multipliers (v_lagrange):", mf.v_lagrange)
     print("Constraint residuals:", mf.constraint_residuals())
 
 

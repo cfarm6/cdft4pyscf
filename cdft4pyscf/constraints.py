@@ -7,10 +7,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from cdft4pyscf.population import constrained_population, orth_ao_weight_matrix
+from cdft4pyscf.projectors import OperatorRepr, ProjectorBuilder
 
 if TYPE_CHECKING:
-    from cdft4pyscf.models import ConstraintSpec
+    from pyscf.gto import Mole
+
+    from cdft4pyscf.models import Constraint
 
 
 @dataclass(slots=True)
@@ -18,78 +20,71 @@ class ConstraintSystem:
     """Linearized representation of constraints used by the solver."""
 
     names: list[str]
-    kinds: list[str]
     targets: np.ndarray
-    operators: list[np.ndarray]
+    target_types: list[str]
+    operators: list[OperatorRepr]
     report_scales: np.ndarray
     report_offsets: np.ndarray
 
 
 def build_constraint_system(
     *,
-    constraints: list["ConstraintSpec"],
-    mol: object,
+    constraints: list["Constraint"],
+    mol: "Mole",
     ao_slices: np.ndarray,
     atom_charges: np.ndarray,
-    population_basis: str = "lowdin",
+    overlap: np.ndarray,
 ) -> ConstraintSystem:
     """Build per-constraint operators and target vector."""
+    n_atoms = int(np.asarray(atom_charges, dtype=float).shape[0])
+    builder = ProjectorBuilder(mol=mol, ao_slices=ao_slices, overlap=overlap)
+
+    def _validate_atom_indices(indices: list[int], *, constraint_name: str) -> None:
+        invalid = sorted({int(index) for index in indices if int(index) >= n_atoms})
+        if invalid:
+            msg = (
+                f"Constraint '{constraint_name}' references atom indices {invalid} "
+                f"outside molecule atom range [0, {n_atoms - 1}]."
+            )
+            raise ValueError(msg)
+
     names: list[str] = []
-    kinds: list[str] = []
     targets: list[float] = []
-    operators: list[np.ndarray] = []
+    target_types: list[str] = []
+    operators: list[OperatorRepr] = []
     report_scales: list[float] = []
     report_offsets: list[float] = []
 
     for constraint in constraints:
         names.append(constraint.name)
-        kinds.append(constraint.kind)
-        if constraint.kind == "electron_number":
-            region_spec = constraint.region
-            if isinstance(region_spec, list):
-                atom_indices = list(
-                    dict.fromkeys(
-                        atom_index for region in region_spec for atom_index in region.atom_indices
-                    )
-                )
-            else:
-                atom_indices = region_spec.atom_indices if region_spec is not None else []
-            operator = orth_ao_weight_matrix(
-                mol=mol,
-                basis=population_basis,
-                atom_indices=atom_indices,
-                ao_slices=ao_slices,
-            )
-            targets.append(constraint.target)
-            operators.append(operator)
+        target_types.append(constraint.target_type)
+
+        atom_indices_flat = [atom for term in constraint.fragments for atom in term.atoms]
+        _validate_atom_indices(atom_indices_flat, constraint_name=constraint.name)
+        operator = builder.build_constraint_operator(constraint)
+        operators.append(operator)
+
+        if constraint.target_type == "electrons":
+            targets.append(float(constraint.target))
             report_scales.append(1.0)
             report_offsets.append(0.0)
-        elif constraint.kind == "net_charge":
-            region_spec = constraint.region
-            if region_spec is None or isinstance(region_spec, list):
-                msg = "net_charge constraints require a single region."
-                raise ValueError(msg)
-            atom_indices = region_spec.atom_indices
-            operator = orth_ao_weight_matrix(
-                mol=mol,
-                basis=population_basis,
-                atom_indices=atom_indices,
-                ao_slices=ao_slices,
-            )
-            region_nuclear_charge = float(np.sum(atom_charges[atom_indices], dtype=float))
-            target_electrons = region_nuclear_charge - constraint.target
-            targets.append(target_electrons)
-            operators.append(operator)
+        elif constraint.target_type == "charge":
+            weighted_nuclear_charge = 0.0
+            for term in constraint.fragments:
+                z_fragment = float(np.sum(atom_charges[term.atoms], dtype=float))
+                weighted_nuclear_charge += float(term.coeff) * z_fragment
+            target_electrons = weighted_nuclear_charge - float(constraint.target)
+            targets.append(float(target_electrons))
             report_scales.append(-1.0)
-            report_offsets.append(region_nuclear_charge)
+            report_offsets.append(weighted_nuclear_charge)
         else:
-            msg = f"Unsupported constraint kind '{constraint.kind}'."
+            msg = f"Unsupported target_type '{constraint.target_type}'."
             raise ValueError(msg)
 
     return ConstraintSystem(
         names=names,
-        kinds=kinds,
         targets=np.asarray(targets, dtype=float),
+        target_types=target_types,
         operators=operators,
         report_scales=np.asarray(report_scales, dtype=float),
         report_offsets=np.asarray(report_offsets, dtype=float),
@@ -98,10 +93,7 @@ def build_constraint_system(
 
 def evaluate_constraint_values(total_density: np.ndarray, system: ConstraintSystem) -> np.ndarray:
     """Evaluate all constraint values for the current total density."""
-    return np.asarray(
-        [constrained_population(total_density, operator) for operator in system.operators],
-        dtype=float,
-    )
+    return np.asarray([operator.trace(total_density) for operator in system.operators], dtype=float)
 
 
 def evaluate_constraint_residuals(

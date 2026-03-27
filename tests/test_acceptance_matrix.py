@@ -6,8 +6,8 @@ import pytest
 
 from cdft4pyscf.api import build_cdft_mean_field
 from cdft4pyscf.exceptions import BackendUnavailableError
-from cdft4pyscf.meanfield import CDFT_UKS, CDFT_UKS_GPU
-from cdft4pyscf.models import ConstraintSpec, RegionSpec, RunRequest
+from cdft4pyscf.meanfield import CDFT
+from cdft4pyscf.models import Constraint, FragmentTerm, RunRequest
 
 
 @pytest.mark.parametrize(
@@ -25,16 +25,16 @@ def test_acceptance_matrix_cpu_cases(xc: str) -> None:
         backend="cpu",
         xc=xc,
         constraints=[
-            ConstraintSpec(
+            Constraint(
                 name="q_tot",
-                kind="net_charge",
+                fragments=[FragmentTerm(atoms=[0, 1], coeff=1.0)],
                 target=0.0,
-                region=RegionSpec(name="all_atoms", atom_indices=[0, 1]),
+                target_type="charge",
             )
         ],
     )
     mf = build_cdft_mean_field(request)
-    assert isinstance(mf, CDFT_UKS)
+    assert isinstance(mf, CDFT)
     assert mf.xc == xc
 
 
@@ -44,11 +44,11 @@ def test_acceptance_matrix_gpu_case() -> None:
         atom="H 0 0 0; H 0 0 0.74",
         backend="gpu",
         constraints=[
-            ConstraintSpec(
+            Constraint(
                 name="q_tot",
-                kind="net_charge",
+                fragments=[FragmentTerm(atoms=[0, 1], coeff=1.0)],
                 target=0.0,
-                region=RegionSpec(name="all_atoms", atom_indices=[0, 1]),
+                target_type="charge",
             )
         ],
     )
@@ -56,4 +56,4 @@ def test_acceptance_matrix_gpu_case() -> None:
         mf = build_cdft_mean_field(request)
     except BackendUnavailableError:
         return
-    assert isinstance(mf, CDFT_UKS_GPU)
+    assert isinstance(mf, CDFT)

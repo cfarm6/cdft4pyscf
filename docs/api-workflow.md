@@ -22,9 +22,9 @@ Create one or more [`ConstraintSpec`](api-reference.md#constraintspec) values.
 Customize [`SolverOptions`](api-reference.md#solveroptions) if defaults are not
 sufficient.
 
-- Outer-loop controls: `max_cycle`, `conv_tol`, `dm_tol`.
-- Inner-loop controls: `vc_max_cycle`, `vc_tol`.
-- Logging controls: `verbosity`, `log_inner_solver`.
+- Outer-loop controls: `max_cycle`, `scf_conv_tol`, `constraint_conv_tol`.
+- Inner-loop controls: `inner_vc_max_cycle`, `inner_vc_tol`, `inner_vc_max_step`.
+- Logging controls: `verbosity`, `inner_solver_trace`.
 
 ## 4) Build a constrained mean-field object
 
@@ -55,3 +55,4 @@ Inspect cDFT helper methods on the mean-field object:
 - `constraint_values()` for final measured values.
 - `constraint_residuals()` for final residuals.
 - `cdft_residual_norm` and `cdft_inner_calls` for diagnostics.
+- `cdft_diagnostics()` for a single explicit diagnostics snapshot.

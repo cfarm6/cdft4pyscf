@@ -19,8 +19,6 @@ Use these pages depending on what you need:
 - `ConstraintSpec`
 - `SolverOptions`
 - `RunRequest`
-- `RunDiagnostics`
-- `RunResult`
 
 ### Exceptions
 

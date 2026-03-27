@@ -1,19 +1,21 @@
-"""Public constructors for class-based constrained DFT workflows."""
+"""Public constructors for wrapper-based constrained DFT workflows."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import importlib
+from typing import TYPE_CHECKING
 
-from pyscf import gto
+from pyscf import dft, gto
 
-from cdft4pyscf.meanfield import CDFT_UKS, CDFT_UKS_GPU
+from cdft4pyscf.exceptions import BackendUnavailableError
+from cdft4pyscf.meanfield import CDFT
 
 if TYPE_CHECKING:
     from cdft4pyscf.models import RunRequest
 
 
-def build_cdft_mean_field(request: "RunRequest") -> Any:
-    """Build a constrained UKS mean-field object from a validated request."""
+def build_cdft_mean_field(request: "RunRequest") -> CDFT:
+    """Build a constrained wrapper object from a validated request."""
     mol = gto.M(
         atom=request.atom,
         basis=request.basis,
@@ -23,35 +25,20 @@ def build_cdft_mean_field(request: "RunRequest") -> Any:
     )
 
     if request.backend == "cpu":
-        mf = CDFT_UKS(
-            mol,
-            constraints=request.constraints,
-            population_basis=request.population.basis,
-            initial_vc=request.options.initial_vc,
-            conv_tol=request.options.conv_tol,
-            vc_tol=request.options.vc_tol,
-            vc_max_cycle=request.options.vc_max_cycle,
-            vc_max_step=request.options.vc_max_step,
-            log_inner_solver=request.options.log_inner_solver,
-        )
+        base = dft.UKS(mol)
     elif request.backend == "gpu":
-        mf = CDFT_UKS_GPU(
-            mol,
-            constraints=request.constraints,
-            population_basis=request.population.basis,
-            initial_vc=request.options.initial_vc,
-            conv_tol=request.options.conv_tol,
-            vc_tol=request.options.vc_tol,
-            vc_max_cycle=request.options.vc_max_cycle,
-            vc_max_step=request.options.vc_max_step,
-            log_inner_solver=request.options.log_inner_solver,
-        )
+        try:
+            gpu_uks = importlib.import_module("gpu4pyscf.dft.uks")
+        except Exception as exc:
+            msg = "GPU backend requested but gpu4pyscf could not be imported."
+            raise BackendUnavailableError(msg) from exc
+        base = gpu_uks.UKS(mol)
     else:
         msg = f"Unsupported backend '{request.backend}'."
         raise ValueError(msg)
 
-    mf.max_cycle = request.options.max_cycle
-    mf.conv_tol = float(request.options.energy_tol)
-    mf.xc = request.xc
-    mf.verbose = request.options.verbosity
-    return mf
+    base.max_cycle = request.options.max_cycle
+    base.conv_tol = float(request.options.scf_conv_tol)
+    base.xc = request.xc
+    base.verbose = request.options.verbosity
+    return CDFT(base, constraints=request.constraints, solver=request.options)

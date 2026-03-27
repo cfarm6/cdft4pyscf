@@ -1,15 +1,17 @@
 # Examples
 
-## Constrained DFT script
+## Constrained DFT scripts
 
-An end-to-end example is available at:
+End-to-end examples are available at:
 
-- `examples/033_constrained_dft.py`
+- `examples/h2o_electron_number.py`
+- `examples/atcne_net_charge.py`
+- `examples/fa-aq_example.py`
 
-Run it from the repository root:
+Run one from the repository root:
 
 ```bash
-pixi run -e dev python examples/033_constrained_dft.py
+pixi run -e dev python examples/h2o_electron_number.py
 ```
 
 ## What the example demonstrates
