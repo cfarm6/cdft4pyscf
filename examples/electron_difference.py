@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from pyscf import dft, gto
+from gpu4pyscf.dft import UKS
+from pyscf import gto
 
 from cdft4pyscf import CDFT, Constraint, FragmentTerm, ProjectorSpec, SolverOptions
 from cdft4pyscf.exceptions import ConvergenceError
@@ -18,7 +19,7 @@ def main() -> None:
     O  0.000  0.000  4.400
     """
     mol = gto.M(atom=atom, basis="6-31g", charge=0, spin=0, verbose=4)
-    base = dft.UKS(mol)
+    base = UKS(mol)
     base.xc = "b3lyp"
     base.max_cycle = 100
 

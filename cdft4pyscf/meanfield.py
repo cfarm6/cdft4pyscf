@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 from types import MethodType
 from typing import Any
@@ -23,6 +24,22 @@ from cdft4pyscf.models import Constraint, SolverOptions
 LOGGER = logging.getLogger(__name__)
 
 
+def _cupy_module() -> Any | None:
+    """Load CuPy lazily when available."""
+    try:
+        return importlib.import_module("cupy")
+    except Exception:
+        return None
+
+
+def _is_cupy_array(value: Any) -> bool:
+    """Return true when value is a CuPy ndarray."""
+    cp = _cupy_module()
+    if cp is None:
+        return False
+    return isinstance(value, cp.ndarray)
+
+
 def _to_numpy_array(value: Any) -> np.ndarray:
     """Convert NumPy/CuPy-like arrays to a NumPy ndarray."""
     if isinstance(value, np.ndarray):
@@ -31,6 +48,24 @@ def _to_numpy_array(value: Any) -> np.ndarray:
     if callable(getter):
         return np.asarray(getter())
     return np.asarray(value)
+
+
+def _to_backend_array(reference: Any, value: np.ndarray) -> Any:
+    """Convert NumPy value to the backend of reference array."""
+    if _is_cupy_array(reference):
+        cp = _cupy_module()
+        if cp is not None:
+            return cp.asarray(value)
+    return np.asarray(value)
+
+
+def _stack_spin_matrices(alpha: Any, beta: Any) -> Any:
+    """Stack alpha and beta blocks preserving backend arrays."""
+    if _is_cupy_array(alpha) and _is_cupy_array(beta):
+        cp = _cupy_module()
+        if cp is not None:
+            return cp.stack([alpha, beta])
+    return np.stack([_to_numpy_array(alpha), _to_numpy_array(beta)])
 
 
 class CDFT:
@@ -47,7 +82,7 @@ class CDFT:
         object.__setattr__(self, "constraints", constraints)
         object.__setattr__(self, "solver_options", solver or SolverOptions())
 
-        overlap = np.asarray(mf.get_ovlp(mf.mol), dtype=float)
+        overlap = _to_numpy_array(mf.get_ovlp(mf.mol)).astype(float, copy=False)
         system = build_constraint_system(
             constraints=constraints,
             mol=mf.mol,
@@ -121,13 +156,17 @@ class CDFT:
     def _density_from_fock(self, fock: np.ndarray, overlap: np.ndarray) -> np.ndarray:
         mo_energy, mo_coeff = self.mf.eig(fock, overlap)
         mo_occ = self.mf.get_occ(mo_energy, mo_coeff)
-        return np.asarray(self.mf.make_rdm1(mo_coeff, mo_occ), dtype=float)
+        return _to_numpy_array(self.mf.make_rdm1(mo_coeff, mo_occ)).astype(float, copy=False)
 
     def _evaluate_residual_for_multipliers(
         self, multipliers: np.ndarray, base_fock: np.ndarray, overlap: np.ndarray
     ) -> np.ndarray:
         operator = self._constraint_operator(multipliers)
-        constrained_fock = np.stack([base_fock[0] + operator, base_fock[1] + operator])
+        operator_like = _to_backend_array(base_fock[0], operator)
+        constrained_fock = _stack_spin_matrices(
+            base_fock[0] + operator_like,
+            base_fock[1] + operator_like,
+        )
         dm = self._density_from_fock(constrained_fock, overlap)
         values = evaluate_constraint_values(dm[0] + dm[1], self.constraint_system)
         return values - self.constraint_system.targets
@@ -266,14 +305,13 @@ class CDFT:
         if dm is None:
             dm = self.mf.make_rdm1()
 
-        h1e_np = _to_numpy_array(h1e)
-        vhf_np = _to_numpy_array(vhf)
-        base_fock = np.stack([h1e_np + vhf_np[0], h1e_np + vhf_np[1]])
+        base_fock = _stack_spin_matrices(h1e + vhf[0], h1e + vhf[1])
         if cycle >= 0:
-            self._solve_multipliers(base_fock, _to_numpy_array(s1e))
+            self._solve_multipliers(base_fock, s1e)
 
         operator = self._constraint_operator(self.v_lagrange)
-        h1e_eff = h1e_np + operator
+        operator_like = _to_backend_array(h1e, operator)
+        h1e_eff = h1e + operator_like
         return self._orig_get_fock(
             h1e=h1e_eff,
             s1e=s1e,
@@ -290,7 +328,7 @@ class CDFT:
     def constraint_values(self, dm: np.ndarray | None = None) -> dict[str, float]:
         """Return user-facing constraint values keyed by constraint name."""
         if dm is None:
-            dm = np.asarray(self.mf.make_rdm1(), dtype=float)
+            dm = _to_numpy_array(self.mf.make_rdm1()).astype(float, copy=False)
         raw = evaluate_constraint_values(dm[0] + dm[1], self.constraint_system)
         shown = report_constraint_values(raw, self.constraint_system)
         return {
@@ -301,7 +339,7 @@ class CDFT:
     def constraint_residuals(self, dm: np.ndarray | None = None) -> dict[str, float]:
         """Return user-facing residual values keyed by constraint name."""
         if dm is None:
-            dm = np.asarray(self.mf.make_rdm1(), dtype=float)
+            dm = _to_numpy_array(self.mf.make_rdm1()).astype(float, copy=False)
         raw = evaluate_constraint_residuals(dm[0] + dm[1], self.constraint_system)
         shown = report_constraint_residuals(raw, self.constraint_system)
         return {
@@ -326,7 +364,7 @@ class CDFT:
     def kernel(self, *args: Any, **kwargs: Any) -> float:
         """Run constrained SCF and enforce both SCF and constraint convergence."""
         energy = float(self.mf.kernel(*args, **kwargs))
-        dm = np.asarray(self.mf.make_rdm1(), dtype=float)
+        dm = _to_numpy_array(self.mf.make_rdm1()).astype(float, copy=False)
         residuals = evaluate_constraint_residuals(dm[0] + dm[1], self.constraint_system)
         residual_norm = float(np.linalg.norm(residuals))
         scf_converged = bool(self.mf.converged)

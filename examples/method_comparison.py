@@ -5,7 +5,8 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pyscf import dft, gto
+from gpu4pyscf import dft
+from pyscf import gto
 
 from cdft4pyscf import CDFT, Constraint, FragmentTerm, ProjectorSpec, SolverOptions
 from cdft4pyscf.exceptions import ConvergenceError
@@ -17,13 +18,13 @@ def run_with_method(method: ProjectorMethod) -> tuple[float, dict[str, float], l
     """Run one cDFT job and return energy, values, and multipliers."""
     mol = gto.M(
         atom="O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587",
-        basis="6-31g",
+        basis="def2-svp",
         charge=0,
         spin=0,
         verbose=0,
     )
     base = dft.UKS(mol)
-    base.xc = "pbe,pbe"
+    base.xc = "b3lyp"
     base.max_cycle = 60
     mf = CDFT(
         base,
