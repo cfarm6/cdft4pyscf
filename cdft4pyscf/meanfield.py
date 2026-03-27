@@ -114,6 +114,7 @@ class CDFT:
                 "fallback_used": None,
                 "inner_solver_evaluations": 0,
                 "residual_norm": float("inf"),
+                "refinement_steps": 0,
                 "trace_messages": [],
             },
         )
@@ -325,6 +326,51 @@ class CDFT:
             fock_last=fock_last,
         )
 
+    def _refine_constraints_after_scf(self) -> tuple[np.ndarray, float]:
+        """Refine multipliers/density after SCF convergence until cDFT converges."""
+        max_steps = max(int(self.solver_options.max_cycle), 1)
+        h1e = self.mf.get_hcore(self.mf.mol)
+        s1e = self.mf.get_ovlp(self.mf.mol)
+        dm_backend = self.mf.make_rdm1()
+        energy = float(getattr(self.mf, "e_tot", 0.0))
+
+        for step in range(max_steps):
+            vhf = self.mf.get_veff(self.mf.mol, dm_backend)
+            base_fock = _stack_spin_matrices(h1e + vhf[0], h1e + vhf[1])
+            self._solve_multipliers(base_fock, s1e)
+
+            operator = self._constraint_operator(self.v_lagrange)
+            operator_like = _to_backend_array(base_fock[0], operator)
+            constrained_fock = _stack_spin_matrices(
+                base_fock[0] + operator_like,
+                base_fock[1] + operator_like,
+            )
+            mo_energy, mo_coeff = self.mf.eig(constrained_fock, s1e)
+            mo_occ = self.mf.get_occ(mo_energy, mo_coeff)
+            dm_backend = self.mf.make_rdm1(mo_coeff, mo_occ)
+
+            # Keep wrapped MF state in sync with refined constrained solution.
+            self.mf.mo_energy = mo_energy
+            self.mf.mo_coeff = mo_coeff
+            self.mf.mo_occ = mo_occ
+
+            dm_np = _to_numpy_array(dm_backend).astype(float, copy=False)
+            residuals = evaluate_constraint_residuals(dm_np[0] + dm_np[1], self.constraint_system)
+            residual_norm = float(np.linalg.norm(residuals))
+            self._last_residuals = np.asarray(residuals, dtype=float)
+            self.solver_state["residual_norm"] = residual_norm
+            self.solver_state["refinement_steps"] = step + 1
+
+            if residual_norm <= self.solver_options.conv_tol_constraint:
+                break
+
+        vhf_final = self.mf.get_veff(self.mf.mol, dm_backend)
+        if hasattr(self.mf, "energy_tot"):
+            energy = float(self.mf.energy_tot(dm=dm_backend, h1e=h1e, vhf=vhf_final))
+            self.mf.e_tot = energy
+        dm_final = _to_numpy_array(dm_backend).astype(float, copy=False)
+        return dm_final, energy
+
     def constraint_values(self, dm: np.ndarray | None = None) -> dict[str, float]:
         """Return user-facing constraint values keyed by constraint name."""
         if dm is None:
@@ -369,6 +415,15 @@ class CDFT:
         residual_norm = float(np.linalg.norm(residuals))
         scf_converged = bool(self.mf.converged)
         cdft_converged = bool(residual_norm <= self.solver_options.conv_tol_constraint)
+
+        # If SCF converged first (common with converged initial guesses), keep
+        # iterating multipliers/density until constraint tolerance is satisfied.
+        if scf_converged and not cdft_converged:
+            dm, energy = self._refine_constraints_after_scf()
+            residuals = evaluate_constraint_residuals(dm[0] + dm[1], self.constraint_system)
+            residual_norm = float(np.linalg.norm(residuals))
+            cdft_converged = bool(residual_norm <= self.solver_options.conv_tol_constraint)
+
         self._last_residuals = np.asarray(residuals, dtype=float)
         self.solver_state["residual_norm"] = residual_norm
         self.converged = bool(scf_converged and cdft_converged)
