@@ -74,6 +74,7 @@ class SolverOptions(BaseModel):
     dm_tol: float = Field(default=1e-6, gt=0.0)
     vc_tol: float = Field(default=1e-6, gt=0.0)
     vc_max_cycle: int = Field(default=50, ge=1)
+    vc_max_step: float = Field(default=0.25, ge=0.0)
     initial_vc: list[float] | None = None
     energy_tol: float = Field(default=1e-6, gt=0.0)
     verbosity: int = Field(default=0, ge=0, le=3)

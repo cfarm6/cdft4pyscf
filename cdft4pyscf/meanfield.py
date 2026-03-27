@@ -74,6 +74,7 @@ class _CDFTMixin:
             "cdft_conv_tol",
             "cdft_vc_tol",
             "cdft_vc_max_cycle",
+            "cdft_vc_max_step",
             "cdft_inner_calls",
             "cdft_last_values",
             "cdft_last_residuals",
@@ -92,6 +93,7 @@ class _CDFTMixin:
         conv_tol: float = 1e-7,
         vc_tol: float = 1e-6,
         vc_max_cycle: int = 50,
+        vc_max_step: float = 0.25,
         log_inner_solver: bool = False,
         raise_on_unconverged: bool = True,
     ) -> None:
@@ -112,6 +114,7 @@ class _CDFTMixin:
         self.cdft_conv_tol = float(conv_tol)
         self.cdft_vc_tol = float(vc_tol)
         self.cdft_vc_max_cycle = int(vc_max_cycle)
+        self.cdft_vc_max_step = max(float(vc_max_step), 0.0)
         self.cdft_log_inner_solver = bool(log_inner_solver)
         self.cdft_raise_on_unconverged = bool(raise_on_unconverged)
 
@@ -191,7 +194,38 @@ class _CDFTMixin:
         )
         logging.info(f"cDFT inner solver result: {result}")
         self.cdft_inner_calls += int(result.nfev)
-        self.vc = np.asarray(result.x, dtype=float)
+        previous_vc = np.asarray(self.vc, dtype=float)
+        previous_residuals = objective(previous_vc)
+        previous_norm = float(np.linalg.norm(previous_residuals))
+
+        candidate_vc = np.asarray(result.x, dtype=float)
+        delta = candidate_vc - previous_vc
+        if self.cdft_vc_max_step > 0.0:
+            delta = np.clip(delta, -self.cdft_vc_max_step, self.cdft_vc_max_step)
+
+        trial_scales = (1.0, 0.5, 0.25, 0.1)
+        best_vc = previous_vc
+        best_norm = previous_norm
+        for scale in trial_scales:
+            trial_vc = previous_vc + (scale * delta)
+            trial_residuals = objective(trial_vc)
+            trial_norm = float(np.linalg.norm(trial_residuals))
+            self.cdft_inner_calls += 1
+            if trial_norm < best_norm:
+                best_vc = trial_vc
+                best_norm = trial_norm
+
+        if bool(result.success):
+            accepted_vc = best_vc
+        else:
+            accepted_vc = best_vc if (best_norm < previous_norm) else previous_vc
+            if self.cdft_log_inner_solver:
+                emit(
+                    "[cDFT][inner] root solver reported failure; "
+                    "using best residual-improving damped step."
+                )
+
+        self.vc = np.asarray(accepted_vc, dtype=float)
 
         if values_cache is None:
             operator = self._constraint_operator(self.vc)
@@ -375,6 +409,7 @@ class CDFT_UKS(_CDFTMixin, pyscf_uks.UKS):  # noqa: N801
         conv_tol: float = 1e-7,
         vc_tol: float = 1e-6,
         vc_max_cycle: int = 50,
+        vc_max_step: float = 0.25,
         log_inner_solver: bool = False,
         raise_on_unconverged: bool = True,
     ) -> None:
@@ -392,6 +427,7 @@ class CDFT_UKS(_CDFTMixin, pyscf_uks.UKS):  # noqa: N801
             conv_tol=conv_tol,
             vc_tol=vc_tol,
             vc_max_cycle=vc_max_cycle,
+            vc_max_step=vc_max_step,
             log_inner_solver=log_inner_solver,
             raise_on_unconverged=raise_on_unconverged,
         )
@@ -411,6 +447,7 @@ def _build_cdft_uks_gpu_class(base_gpu_uks: type[Any]) -> type[Any]:
             conv_tol: float = 1e-7,
             vc_tol: float = 1e-6,
             vc_max_cycle: int = 50,
+            vc_max_step: float = 0.25,
             log_inner_solver: bool = False,
             raise_on_unconverged: bool = True,
         ) -> None:
@@ -428,6 +465,7 @@ def _build_cdft_uks_gpu_class(base_gpu_uks: type[Any]) -> type[Any]:
                 conv_tol=conv_tol,
                 vc_tol=vc_tol,
                 vc_max_cycle=vc_max_cycle,
+                vc_max_step=vc_max_step,
                 log_inner_solver=log_inner_solver,
                 raise_on_unconverged=raise_on_unconverged,
             )

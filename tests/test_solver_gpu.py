@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any
+
 import numpy as np
 
+from cdft4pyscf import meanfield
 from cdft4pyscf.api import build_cdft_mean_field
 from cdft4pyscf.constraints import ConstraintSystem
 from cdft4pyscf.exceptions import BackendUnavailableError
 from cdft4pyscf.meanfield import CDFT_UKS_GPU, _CDFTMixin
 from cdft4pyscf.models import ConstraintSpec, RegionSpec, RunRequest
+
+UNCHANGED_VC = 0.1
+BOUNDED_VC = 0.75
 
 
 def test_gpu_backend_builds_or_raises_typed_error() -> None:
@@ -83,3 +90,73 @@ def test_get_fock_avoids_implicit_numpy_coercion() -> None:
     getter = getattr(fock, "get", None)
     fock_np = getter() if callable(getter) else np.asarray(fock)
     assert fock_np.shape == (2, 2)
+
+
+def test_update_vc_rejects_non_improving_failed_root(monkeypatch) -> None:
+    """Failed inner solves should not overwrite vc with a worse candidate."""
+
+    class DummyCDFT(_CDFTMixin):
+        def _density_from_fock(self: Any, fock: np.ndarray, overlap: np.ndarray) -> np.ndarray:
+            _ = overlap
+            return np.asarray(fock, dtype=float)
+
+    def fake_root(_objective, x0, **_kwargs):
+        return SimpleNamespace(
+            x=np.asarray([10.0], dtype=float),
+            success=False,
+            status=2,
+            nfev=1,
+        )
+
+    monkeypatch.setattr(meanfield.optimize, "root", fake_root)
+
+    system = ConstraintSystem(
+        names=["q_tot"],
+        kinds=["net_charge"],
+        targets=np.asarray([0.0], dtype=float),
+        operators=[np.eye(2, dtype=float)],
+        report_scales=np.asarray([-1.0], dtype=float),
+        report_offsets=np.asarray([0.0], dtype=float),
+    )
+    mf = DummyCDFT()
+    mf._init_cdft(constraint_system=system, initial_vc=[UNCHANGED_VC], vc_max_step=0.25)
+    base_fock = np.zeros((2, 2, 2), dtype=float)
+    overlap = np.eye(2, dtype=float)
+
+    mf._update_vc(base_fock=base_fock, overlap=overlap)
+    assert mf.vc[0] == UNCHANGED_VC
+
+
+def test_update_vc_applies_bounded_step_on_success(monkeypatch) -> None:
+    """Even successful roots should move vc in bounded residual-improving steps."""
+
+    class DummyCDFT(_CDFTMixin):
+        def _density_from_fock(self: Any, fock: np.ndarray, overlap: np.ndarray) -> np.ndarray:
+            _ = overlap
+            return np.asarray(fock, dtype=float)
+
+    def fake_root(_objective, x0, **_kwargs):
+        return SimpleNamespace(
+            x=np.asarray([0.0], dtype=float),
+            success=True,
+            status=1,
+            nfev=1,
+        )
+
+    monkeypatch.setattr(meanfield.optimize, "root", fake_root)
+
+    system = ConstraintSystem(
+        names=["q_tot"],
+        kinds=["net_charge"],
+        targets=np.asarray([0.0], dtype=float),
+        operators=[np.eye(2, dtype=float)],
+        report_scales=np.asarray([-1.0], dtype=float),
+        report_offsets=np.asarray([0.0], dtype=float),
+    )
+    mf = DummyCDFT()
+    mf._init_cdft(constraint_system=system, initial_vc=[1.0], vc_max_step=0.25)
+    base_fock = np.zeros((2, 2, 2), dtype=float)
+    overlap = np.eye(2, dtype=float)
+
+    mf._update_vc(base_fock=base_fock, overlap=overlap)
+    assert mf.vc[0] == BOUNDED_VC

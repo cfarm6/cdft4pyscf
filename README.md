@@ -108,9 +108,28 @@ inside the cDFT mean-field object:
 3. Inject constraint operator into the mean-field Fock construction.
 4. Let PySCF SCF machinery (including built-in DIIS controls) continue the cycle.
 
+### Inner `Vc` solve robustness
+
+To reduce late-iteration divergence (for example, residual spikes after apparent
+early convergence), the inner multiplier update uses guarded acceptance:
+
+1. Solve for a candidate `Vc` with SciPy `optimize.root(..., method="hybr")`.
+2. Compute a bounded step from the previous multiplier:
+   `delta = clip(Vc_candidate - Vc_prev, -vc_max_step, vc_max_step)`.
+3. Backtrack over damped trial steps (`1.0, 0.5, 0.25, 0.1`) and evaluate the
+   residual norm for each.
+4. Accept the best residual-improving trial; if the SciPy solve reports failure
+   and no trial improves the residual norm, keep `Vc_prev`.
+
+This keeps the `Vc` trajectory stable when the SCF map is non-smooth (for
+example, near occupation changes) and avoids committing large unbounded
+multiplier jumps from failed inner solves.
+
 ## Convergence and Failure Behavior
 
 - SCF and cDFT tolerances are configurable on the mean-field object.
+- `vc_max_step` controls the maximum per-constraint `Vc` step accepted each
+  inner update (`0.25` by default).
 - Fractional electron targets are treated as continuous target values during `Vc` root solving.
 - If convergence fails within iteration limits, the class raises `ConvergenceError`.
 

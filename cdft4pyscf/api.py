@@ -31,6 +31,7 @@ def build_cdft_mean_field(request: "RunRequest") -> Any:
             conv_tol=request.options.conv_tol,
             vc_tol=request.options.vc_tol,
             vc_max_cycle=request.options.vc_max_cycle,
+            vc_max_step=request.options.vc_max_step,
             log_inner_solver=request.options.log_inner_solver,
         )
     elif request.backend == "gpu":
@@ -42,6 +43,7 @@ def build_cdft_mean_field(request: "RunRequest") -> Any:
             conv_tol=request.options.conv_tol,
             vc_tol=request.options.vc_tol,
             vc_max_cycle=request.options.vc_max_cycle,
+            vc_max_step=request.options.vc_max_step,
             log_inner_solver=request.options.log_inner_solver,
         )
     else:
