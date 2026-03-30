@@ -13,36 +13,51 @@ from cdft4pyscf import CDFT, Constraint, FragmentTerm, ProjectorSpec, SolverOpti
 working_dir = Path(__file__).parent
 chk_dir = working_dir / "chkfiles"
 chk_dir.mkdir(exist_ok=True, parents=True)
+structure_dir = working_dir / "structures"
+structure_file = next(structure_dir.glob("*.xyz"))
 
-atom = (
-    "C -1.2251 -0.7061 0.0001; C -1.2250 0.7060 0.0001; "
-    "C 1.2251 -0.7061 0.0001; C 1.2251 0.7061 0.0002; "
-    "N 2.2122 -2.0265 2.5000; N -2.2208 -2.0177 2.5000; "
-    "N -2.2117 2.0274 2.5001; N 2.2209 2.0168 2.5001"
-)
-
-mol = gto.M(atom=atom, basis="def2-svp", charge=0, spin=0, verbose=4)
+mol = gto.M(atom=structure_file.as_posix(), basis="def2-svp", charge=0, spin=0, verbose=4)
 base = UKS(mol)
-base.xc = "b3lyp"
-base.max_cycle = 80
-base.chkfile = chk_dir / "atcne_smoke.chk"
+base.xc = "b3lyp-d3bj"
+base.max_cycle = 100
+base.chkfile = chk_dir / "atcne.chk"
+base.init_guess = "chkfile"
+energy = base.kernel()
 
+# Now run cDFT
 mf = CDFT(
     base,
     constraints=[
         Constraint(
             name="anthracene_charge",
-            fragments=[FragmentTerm(atoms=[0, 1, 2, 3], coeff=1.0)],
+            fragments=[FragmentTerm(atoms=list(range(24)), coeff=1.0)],
             target=0.0,
             target_type="charge",
-            projector=ProjectorSpec(method="lowdin"),
+            projector=ProjectorSpec(method="iao"),
         )
     ],
-    solver=SolverOptions(mode="micro", conv_tol_constraint=1e-6),
+    solver=SolverOptions(mode="newton_kkt", conv_tol_constraint=1e-6),
 )
+e0 = mf.kernel()
 
-energy = mf.kernel()
+# Now run cDFT
+mf = CDFT(
+    base,
+    constraints=[
+        Constraint(
+            name="anthracene_charge",
+            fragments=[FragmentTerm(atoms=list(range(24)), coeff=1.0)],
+            target=1.0,
+            target_type="charge",
+            projector=ProjectorSpec(method="iao"),
+        )
+    ],
+    solver=SolverOptions(mode="newton_kkt", conv_tol_constraint=1e-6),
+)
+e1 = mf.kernel()
+
 print("Converged:", mf.converged)
-print("Energy (Eh):", energy)
+print("Energy (Eh):", e0)
 print("Constraint values:", mf.constraint_values())
 print("Constraint residuals:", mf.constraint_residuals())
+print("Lagrange Multipliers:", mf.v_lagrange)
